@@ -1,6 +1,7 @@
 using SmoothTube.Models;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -10,17 +11,20 @@ namespace SmoothTube.Services
 {
     public static class WatchHistoryService
     {
-        private const string ContinueWatchingSetting = "ContinueWatchingVideos";
+        private const string ContinueWatchingFileName = "continue-watching.json";
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
-            PropertyNameCaseInsensitive = true
+            PropertyNameCaseInsensitive = true,
+            WriteIndented = false
         };
 
         public static void RecordStarted(VideoItem video)
         {
-            if (string.IsNullOrWhiteSpace(video.Id))
+            if (video == null || string.IsNullOrWhiteSpace(video.Id))
+            {
                 return;
+            }
 
             List<VideoItem> videos = GetContinueWatching();
 
@@ -37,65 +41,109 @@ namespace SmoothTube.Services
                     Duration = video.Duration,
                     PublishedAt = video.PublishedAt,
                     Thumbnail = NormalizeVideoThumbnailUrl(video.Thumbnail),
-                    Description = video.Description,
                     Category = video.Category,
                     ChannelId = video.ChannelId,
                     IsEmbeddable = video.IsEmbeddable,
                     IsLive = video.IsLive,
                     IsPremiere = video.IsPremiere,
                     IsShort = video.IsShort,
-                    Likes = video.Likes,
-                    LiveChatId = video.LiveChatId,
                     Progress = NormalizeProgress(video.Progress)
+
+                    // Important:
+                    // Do NOT save Description, Likes, LiveChatId, etc. here.
+                    // Continue Watching only needs lightweight card data.
                 });
 
-            Save(videos.Take(3).ToList());
+            Save(videos.Take(10).ToList());
         }
 
         public static List<VideoItem> GetContinueWatching()
         {
-            object? value =
-                ApplicationData.Current.LocalSettings.Values[ContinueWatchingSetting];
-
-            if (value is not string rawValue ||
-                string.IsNullOrWhiteSpace(rawValue))
-            {
-                return [];
-            }
-
             try
             {
+                string path = GetContinueWatchingFilePath();
+
+                if (!File.Exists(path))
+                {
+                    return [];
+                }
+
+                string rawValue = File.ReadAllText(path);
+
+                if (string.IsNullOrWhiteSpace(rawValue))
+                {
+                    return [];
+                }
+
                 List<VideoItem> videos =
-                    JsonSerializer.Deserialize<List<VideoItem>>(
-                    rawValue,
-                    JsonOptions) ?? [];
+                    JsonSerializer.Deserialize<List<VideoItem>>(rawValue, JsonOptions) ?? [];
 
                 foreach (VideoItem video in videos)
                 {
-                    video.Thumbnail =
-                        NormalizeVideoThumbnailUrl(video.Thumbnail);
+                    video.Thumbnail = NormalizeVideoThumbnailUrl(video.Thumbnail);
+                    video.Progress = NormalizeProgress(video.Progress);
                 }
 
                 return videos;
             }
-            catch (JsonException)
+            catch
             {
                 return [];
             }
+        }
+
+        public static void Clear()
+        {
+            try
+            {
+                string path = GetContinueWatchingFilePath();
+
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch
+            {
+                // Ignore clear failures so the app never crashes from history cleanup.
+            }
+        }
+
+        private static void Save(List<VideoItem> videos)
+        {
+            try
+            {
+                string path = GetContinueWatchingFilePath();
+
+                string folder = Path.GetDirectoryName(path) ?? ApplicationData.Current.LocalFolder.Path;
+
+                Directory.CreateDirectory(folder);
+
+                string json = JsonSerializer.Serialize(videos, JsonOptions);
+
+                File.WriteAllText(path, json);
+            }
+            catch
+            {
+                // Do not crash the app if Continue Watching cannot be saved.
+            }
+        }
+
+        private static string GetContinueWatchingFilePath()
+        {
+            return Path.Combine(
+                ApplicationData.Current.LocalFolder.Path,
+                ContinueWatchingFileName);
         }
 
         private static double NormalizeProgress(double progress)
         {
             if (progress is > 0 and < 95)
+            {
                 return progress;
+            }
 
             return 35;
-        }
-
-        private static void Save(List<VideoItem> videos)
-        {
-            ApplicationData.Current.LocalSettings.Values[ContinueWatchingSetting] =
-                JsonSerializer.Serialize(videos, JsonOptions);
         }
 
         private static string NormalizeVideoThumbnailUrl(string value)
