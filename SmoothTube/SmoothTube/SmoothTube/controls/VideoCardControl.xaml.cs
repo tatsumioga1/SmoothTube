@@ -274,29 +274,65 @@ namespace SmoothTube.Controls
         private void UpdateThumbnailSource()
         {
             if (ThumbnailImage == null)
+            {
                 return;
+            }
 
-            string thumbnail =
-                Thumbnail?.StartsWith("//", StringComparison.Ordinal) == true
-                    ? "https:" + Thumbnail
-                    : Thumbnail ?? "";
+            string thumbnail = Thumbnail?.StartsWith("//", StringComparison.Ordinal) == true
+                ? "https:" + Thumbnail
+                : Thumbnail ?? "";
+
+            thumbnail = NormalizeYouTubeThumbnailUrl(thumbnail);
 
             if (Uri.TryCreate(thumbnail, UriKind.Absolute, out Uri? uri) &&
                 (uri.Scheme == "https" ||
-                    uri.Scheme == "http" ||
-                    uri.Scheme == "ms-appx" ||
-                    uri.Scheme == "file"))
+                 uri.Scheme == "http" ||
+                 uri.Scheme == "ms-appx" ||
+                 uri.Scheme == "file"))
             {
-                ThumbnailImage.Source =
-                    new BitmapImage(uri)
-                    {
-                        DecodePixelWidth = Math.Max(1, (int)CardWidth),
-                        DecodePixelHeight = Math.Max(1, (int)ThumbnailHeight)
-                    };
+                ThumbnailImage.Source = new BitmapImage(uri)
+                {
+                    DecodePixelWidth = Math.Max(1, (int)CardWidth)
+
+                    // Important:
+                    // Do not set DecodePixelHeight here.
+                    // Setting both width and height can make odd YouTube thumbnails look forced/squashed.
+                };
+
                 return;
             }
 
             ThumbnailImage.Source = null;
+        }
+
+        private static string NormalizeYouTubeThumbnailUrl(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+
+            if (!value.Contains("ytimg.com/", StringComparison.OrdinalIgnoreCase))
+            {
+                return value;
+            }
+
+            // Live thumbnails often come as hqdefault_live.jpg, which is more 4:3-ish.
+            // Prefer the 16:9 live version.
+            value = value
+                .Replace("/default_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
+                .Replace("/mqdefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
+                .Replace("/hqdefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
+                .Replace("/sddefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase);
+
+            // Normal videos sometimes come as 4:3 thumbnails too.
+            value = value
+                .Replace("/default.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase)
+                .Replace("/mqdefault.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase)
+                .Replace("/hqdefault.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase)
+                .Replace("/sddefault.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase);
+
+            return value;
         }
 
         private void Card_PointerEntered(
