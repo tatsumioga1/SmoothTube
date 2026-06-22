@@ -37,6 +37,8 @@ namespace SmoothTube
         private int loadedUploadDays = 1;
         private CancellationTokenSource? loadCancellation;
 
+        private const int InitialUploadLimit = 15;
+
         public SubscriptionsPage()
         {
             InitializeComponent();
@@ -101,9 +103,7 @@ namespace SmoothTube
         {
             loadCancellation?.Cancel();
             loadCancellation = new CancellationTokenSource();
-
-            CancellationToken cancellationToken =
-                loadCancellation.Token;
+            CancellationToken cancellationToken = loadCancellation.Token;
 
             if (forceRefresh)
             {
@@ -121,24 +121,30 @@ namespace SmoothTube
             PremiereVideos.Clear();
             LivestreamVideos.Clear();
 
-            StatusText = "Loading subscriptions...";
+            StatusText = "Loading 15 recent subscription uploads...";
             Bindings.Update();
 
             try
             {
-                Task uploadsTask =
-                    LoadUploadRangeAsync(
-                        loadedUploadDays,
-                        false,
-                        null,
-                        cancellationToken);
-
-                Task broadcastsTask =
-                    LoadBroadcastsAsync(cancellationToken);
-
-                await Task.WhenAll(uploadsTask, broadcastsTask);
+                await LoadUploadRangeAsync(
+                    loadedUploadDays,
+                    false,
+                    InitialUploadLimit,
+                    cancellationToken);
 
                 ApplyVisibleFilters();
+
+                StatusText =
+                    Videos.Count == 0
+                        ? "No recent uploads found."
+                        : FormatStatusText(false);
+
+                Bindings.Update();
+
+                // Important:
+                // Do NOT auto-load livestreams/premieres here.
+                // That scan is expensive and can hang the page.
+                // It will load only when the user clicks those tabs.
             }
             catch (TaskCanceledException)
             {
@@ -161,8 +167,8 @@ namespace SmoothTube
             int addedCount = 0;
 
             StatusText = append
-                ? $"Loading uploads from day {days}..."
-                : "Loading latest subscription uploads...";
+                ? $"Loading more uploads..."
+                : "Loading 15 recent subscription uploads...";
 
             Bindings.Update();
 
@@ -179,39 +185,33 @@ namespace SmoothTube
                     List<VideoItem> uploadVideos =
                         batch
                             .Where(video => !video.IsLive && !video.IsPremiere)
+                            .Where(video =>
+                                loadedUploads.All(existingVideo =>
+                                    existingVideo.Id != video.Id))
                             .OrderByDescending(GetPublishedAtSort)
                             .ToList();
 
-                    List<VideoItem> broadcastVideos =
-                        batch
-                            .Where(video => video.IsLive || video.IsPremiere)
-                            .OrderByDescending(GetPublishedAtSort)
-                            .ToList();
+                    int remaining =
+                        maxNewVideos == null
+                            ? int.MaxValue
+                            : Math.Max(0, maxNewVideos.Value - addedCount);
 
-                    if (append)
-                    {
-                        uploadVideos =
-                            uploadVideos
-                                .Where(video =>
-                                    loadedUploads.All(existingVideo =>
-                                        existingVideo.Id != video.Id))
-                                .Take((maxNewVideos ?? int.MaxValue) - addedCount)
-                                .ToList();
-                    }
+                    uploadVideos =
+                        uploadVideos
+                            .Take(remaining)
+                            .ToList();
 
                     int beforeMergeCount =
                         loadedUploads.Count;
 
                     MergeVideos(loadedUploads, uploadVideos);
-                    MergeVideos(loadedBroadcasts, broadcastVideos);
 
                     addedCount +=
                         loadedUploads.Count - beforeMergeCount;
 
                     ApplyVisibleFilters(true);
 
-                    if (append &&
-                        maxNewVideos != null &&
+                    if (maxNewVideos != null &&
                         addedCount >= maxNewVideos.Value)
                     {
                         break;
@@ -220,7 +220,7 @@ namespace SmoothTube
 
                 if (append && loadedUploads.Count == startingCount)
                 {
-                    StatusText = $"No more uploads found for day {days}.";
+                    StatusText = $"No more uploads found.";
                     Bindings.Update();
                 }
             }

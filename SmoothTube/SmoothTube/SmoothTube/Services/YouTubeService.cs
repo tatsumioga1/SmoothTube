@@ -1150,9 +1150,11 @@ namespace SmoothTube.Services
                         .ToList(),
                     cancellationToken);
 
-                await TryEnrichVideosFromWatchPagesAsync(
-                    batchVideos.Take(80),
-                    cancellationToken);
+                // Do not run watch-page scraping during subscription feed loading.
+                // It is too heavy when multiplied across many subscribed channels.
+                //await TryEnrichVideosFromWatchPagesAsync(
+                //    batchVideos.Take(80),
+                //    cancellationToken);
 
                 allVideos.AddRange(batchVideos);
 
@@ -1180,7 +1182,7 @@ namespace SmoothTube.Services
         }
 
         public async IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
-    [EnumeratorCancellation] CancellationToken cancellationToken = default)
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             List<ChannelItem> subscriptions =
                 await GetSubscriptionsAsync(cancellationToken);
@@ -1188,7 +1190,7 @@ namespace SmoothTube.Services
             HashSet<string> yieldedIds =
                 new(StringComparer.OrdinalIgnoreCase);
 
-            foreach (ChannelItem[] batch in subscriptions.Chunk(8))
+            foreach (ChannelItem[] batch in subscriptions.Chunk(4))
             {
                 List<VideoItem>[] groups =
                     await Task.WhenAll(
@@ -1212,11 +1214,11 @@ namespace SmoothTube.Services
                 }
 
                 await TryEnrichVideosAsync(batchBroadcasts, cancellationToken);
-                //await TryEnrichVideosFromWatchPagesAsync(batchBroadcasts, cancellationToken);
 
                 batchBroadcasts =
                     batchBroadcasts
                         .Where(video => video.IsEmbeddable)
+                        .Where(video => video.IsLive || video.IsPremiere)
                         .OrderByDescending(video => video.IsLive)
                         .ThenBy(video => video.IsPremiere)
                         .ThenByDescending(GetPublishedAtSort)
@@ -1620,19 +1622,92 @@ namespace SmoothTube.Services
                     "upcoming",
                     cancellationToken));
 
-            // /live usually gives one featured/current stream.
-            broadcasts.AddRange(
-                await GetChannelLivePageBroadcastsAsync(
-                    channelId,
-                    cancellationToken));
-
-            // /streams can reveal multiple live/upcoming streams on the channel.
-            broadcasts.AddRange(
-                await GetChannelStreamsPageBroadcastsAsync(
-                    channelId,
-                    cancellationToken));
-
             return broadcasts
+                .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                .GroupBy(video => video.Id)
+                .Select(group => group.First())
+                .ToList();
+        }
+
+        private static async Task<List<VideoItem>> SearchChannelLiveVideosAsync(
+            ChannelItem channel,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(channel.Id) ||
+                string.IsNullOrWhiteSpace(channel.Title))
+            {
+                return [];
+            }
+
+            List<VideoItem> videos = [];
+
+            string[] queries =
+            [
+                $"{channel.Title} live",
+        $"{channel.Title} livestream"
+            ];
+
+            foreach (string query in queries)
+            {
+                string requestUri =
+                    "https://www.googleapis.com/youtube/v3/search" +
+                    "?part=snippet&type=video&eventType=live&maxResults=5" +
+                    $"&q={Uri.EscapeDataString(query)}";
+
+                try
+                {
+                    using HttpResponseMessage response =
+                        await SendYouTubeGetAsync(
+                            requestUri,
+                            cancellationToken);
+
+                    if (!response.IsSuccessStatusCode)
+                        continue;
+
+                    await using var contentStream =
+                        await response.Content.ReadAsStreamAsync(cancellationToken);
+
+                    YouTubeSearchResponse? searchResponse =
+                        await JsonSerializer.DeserializeAsync<YouTubeSearchResponse>(
+                            contentStream,
+                            JsonOptions,
+                            cancellationToken);
+
+                    videos.AddRange(
+                        searchResponse?.Items?
+                            .Where(item => !string.IsNullOrWhiteSpace(item.Id?.VideoId))
+                            .Where(item =>
+                                string.Equals(
+                                    item.Snippet?.ChannelId,
+                                    channel.Id,
+                                    StringComparison.OrdinalIgnoreCase))
+                            .Select(item => new VideoItem
+                            {
+                                Id = item.Id?.VideoId ?? "",
+                                Title = Decode(item.Snippet?.Title),
+                                Channel = Decode(item.Snippet?.ChannelTitle),
+                                ChannelId = item.Snippet?.ChannelId ?? channel.Id,
+                                PublishedAt = "Live now",
+                                PublishedAtSort = DateTimeOffset.Now,
+                                Thumbnail = NormalizeVideoThumbnailUrl(
+                                    item.Snippet?.Thumbnails?.High?.Url ??
+                                    item.Snippet?.Thumbnails?.Medium?.Url ??
+                                    item.Snippet?.Thumbnails?.Default?.Url ??
+                                    ""),
+                                IsLive = true,
+                                IsPremiere = false,
+                                IsEmbeddable = true,
+                                Category = "YouTube"
+                            }) ?? []);
+                }
+                catch (Exception ex) when (ex is HttpRequestException ||
+                    ex is JsonException ||
+                    ex is TaskCanceledException)
+                {
+                }
+            }
+
+            return videos
                 .Where(video => !string.IsNullOrWhiteSpace(video.Id))
                 .GroupBy(video => video.Id)
                 .Select(group => group.First())
