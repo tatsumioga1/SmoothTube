@@ -69,6 +69,9 @@ namespace SmoothTube.Services
             bool includeShorts = true,
             CancellationToken cancellationToken = default);
 
+        IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
+            CancellationToken cancellationToken = default);
+
         Task<List<VideoItem>> GetSubscribedBroadcastsAsync(
             CancellationToken cancellationToken = default);
 

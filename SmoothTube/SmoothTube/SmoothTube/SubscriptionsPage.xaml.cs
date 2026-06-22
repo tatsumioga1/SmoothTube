@@ -61,7 +61,7 @@ namespace SmoothTube
             await LoadVideosAsync(false);
         }
 
-        private async void Filters_Changed(
+        private void Filters_Changed(
             object sender,
             RoutedEventArgs e)
         {
@@ -71,7 +71,6 @@ namespace SmoothTube
             if (ReferenceEquals(sender, IncludeShortsSwitch))
             {
                 ApplyVisibleFilters();
-                return;
             }
         }
 
@@ -90,6 +89,7 @@ namespace SmoothTube
                 return;
 
             loadedUploadDays++;
+
             await LoadUploadRangeAsync(
                 loadedUploadDays,
                 true,
@@ -101,7 +101,9 @@ namespace SmoothTube
         {
             loadCancellation?.Cancel();
             loadCancellation = new CancellationTokenSource();
-            CancellationToken cancellationToken = loadCancellation.Token;
+
+            CancellationToken cancellationToken =
+                loadCancellation.Token;
 
             if (forceRefresh)
             {
@@ -111,32 +113,32 @@ namespace SmoothTube
             loadedUploadDays = 1;
             loadedUploads.Clear();
             loadedBroadcasts.Clear();
+
             broadcastsLoaded = false;
+            broadcastsLoading = false;
+
             Videos.Clear();
             PremiereVideos.Clear();
             LivestreamVideos.Clear();
-            StatusText = "Loading the latest subscription uploads...";
+
+            StatusText = "Loading subscriptions...";
             Bindings.Update();
 
             try
             {
-                await LoadUploadRangeAsync(
-                    loadedUploadDays,
-                    false,
-                    null,
-                    cancellationToken);
+                Task uploadsTask =
+                    LoadUploadRangeAsync(
+                        loadedUploadDays,
+                        false,
+                        null,
+                        cancellationToken);
 
-                StatusText =
-                    Videos.Count == 0
-                        ? "No recent videos loaded for these filters."
-                        : FormatStatusText(false);
+                Task broadcastsTask =
+                    LoadBroadcastsAsync(cancellationToken);
 
-                Bindings.Update();
+                await Task.WhenAll(uploadsTask, broadcastsTask);
 
-                if (SubscriptionsPivot.SelectedIndex > 0)
-                {
-                    await LoadBroadcastsAsync(cancellationToken);
-                }
+                ApplyVisibleFilters();
             }
             catch (TaskCanceledException)
             {
@@ -154,38 +156,62 @@ namespace SmoothTube
 
             isLoading = true;
             LoadMoreButton.IsEnabled = false;
+
+            int startingCount = loadedUploads.Count;
+            int addedCount = 0;
+
             StatusText = append
                 ? $"Loading uploads from day {days}..."
-                : "Loading the latest subscription uploads...";
+                : "Loading latest subscription uploads...";
+
             Bindings.Update();
 
             try
             {
-                List<VideoItem> videos =
-                    await ServiceLocator.YouTube.GetSubscribedVideosAsync(
+                await foreach (List<VideoItem> batch in
+                    ServiceLocator.YouTube.GetSubscribedVideoBatchesAsync(
                         days,
                         true,
-                        cancellationToken);
-
-                List<VideoItem> uploadVideos =
-                    videos
-                        .Where(video => !video.IsLive && !video.IsPremiere)
-                        .OrderByDescending(GetPublishedAtSort)
-                        .ToList();
-
-                if (append)
+                        cancellationToken))
                 {
-                    uploadVideos =
-                        uploadVideos
-                            .Where(video => loadedUploads.All(existingVideo => existingVideo.Id != video.Id))
-                            .Take(maxNewVideos ?? int.MaxValue)
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    List<VideoItem> uploadVideos =
+                        batch
+                            .Where(video => !video.IsLive && !video.IsPremiere)
+                            .OrderByDescending(GetPublishedAtSort)
                             .ToList();
+
+                    if (append)
+                    {
+                        uploadVideos =
+                            uploadVideos
+                                .Where(video =>
+                                    loadedUploads.All(existingVideo =>
+                                        existingVideo.Id != video.Id))
+                                .Take((maxNewVideos ?? int.MaxValue) - addedCount)
+                                .ToList();
+                    }
+
+                    int beforeMergeCount =
+                        loadedUploads.Count;
+
+                    MergeVideos(loadedUploads, uploadVideos);
+
+                    addedCount +=
+                        loadedUploads.Count - beforeMergeCount;
+
+                    ApplyVisibleFilters(true);
+
+                    if (append &&
+                        maxNewVideos != null &&
+                        addedCount >= maxNewVideos.Value)
+                    {
+                        break;
+                    }
                 }
 
-                MergeVideos(loadedUploads, uploadVideos);
-                ApplyVisibleFilters();
-
-                if (append && uploadVideos.Count == 0)
+                if (append && loadedUploads.Count == startingCount)
                 {
                     StatusText = $"No more uploads found for day {days}.";
                     Bindings.Update();
@@ -204,23 +230,36 @@ namespace SmoothTube
                 return;
 
             broadcastsLoading = true;
+
             StatusText = "Checking live and upcoming subscriptions...";
             Bindings.Update();
 
             try
             {
-                List<VideoItem> broadcasts =
-                    await ServiceLocator.YouTube.GetSubscribedBroadcastsAsync(cancellationToken);
+                await foreach (List<VideoItem> batch in
+                    ServiceLocator.YouTube.GetSubscribedBroadcastBatchesAsync(
+                        cancellationToken))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
 
-                loadedBroadcasts.Clear();
-                loadedBroadcasts.AddRange(broadcasts);
+                    MergeVideos(loadedBroadcasts, batch);
+
+                    ApplyVisibleFilters(true);
+                }
+
                 broadcastsLoaded = true;
                 ApplyVisibleFilters();
+            }
+            catch (TaskCanceledException)
+            {
+                throw;
             }
             catch (Exception ex) when (ex is InvalidOperationException ||
                 ex is System.Runtime.InteropServices.COMException)
             {
-                StatusText = "Live and premiere checks failed. Try Refresh in a moment.";
+                StatusText =
+                    "Live and premiere checks failed. Try Refresh in a moment.";
+
                 Bindings.Update();
             }
             finally
@@ -251,7 +290,7 @@ namespace SmoothTube
             }
         }
 
-        private void ApplyVisibleFilters()
+        private void ApplyVisibleFilters(bool stillLoading = false)
         {
             List<VideoItem> visibleVideos =
                 loadedUploads
@@ -286,8 +325,10 @@ namespace SmoothTube
 
             StatusText =
                 Videos.Count == 0 && PremiereVideos.Count == 0 && LivestreamVideos.Count == 0
-                    ? "No recent videos loaded for these filters."
-                    : FormatStatusText(false);
+                    ? stillLoading
+                        ? "Loading subscriptions..."
+                        : "No recent videos loaded for these filters."
+                    : FormatStatusText(stillLoading);
 
             Bindings.Update();
         }
@@ -300,11 +341,11 @@ namespace SmoothTube
             string title = video.Title ?? "";
 
             bool titleLooksShort =
-                title.Contains("#short", System.StringComparison.OrdinalIgnoreCase) ||
-                title.Contains(" shorts", System.StringComparison.OrdinalIgnoreCase) ||
-                title.Contains(" short ", System.StringComparison.OrdinalIgnoreCase) ||
-                title.EndsWith(" short", System.StringComparison.OrdinalIgnoreCase) ||
-                title.Contains("ytshorts", System.StringComparison.OrdinalIgnoreCase);
+                title.Contains("#short", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains(" shorts", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains(" short ", StringComparison.OrdinalIgnoreCase) ||
+                title.EndsWith(" short", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("ytshorts", StringComparison.OrdinalIgnoreCase);
 
             if (string.IsNullOrWhiteSpace(video.Duration))
                 return titleLooksShort;

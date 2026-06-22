@@ -1151,13 +1151,14 @@ namespace SmoothTube.Services
                 maxAgeDays);
         }
 
-        public async Task<List<VideoItem>> GetSubscribedBroadcastsAsync(
-            CancellationToken cancellationToken = default)
+        public async IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
+    [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             List<ChannelItem> subscriptions =
                 await GetSubscriptionsAsync(cancellationToken);
 
-            List<VideoItem> broadcasts = [];
+            HashSet<string> yieldedIds =
+                new(StringComparer.OrdinalIgnoreCase);
 
             foreach (ChannelItem[] batch in subscriptions.Chunk(8))
             {
@@ -1168,20 +1169,52 @@ namespace SmoothTube.Services
                                 channel.Id,
                                 cancellationToken)));
 
-                broadcasts.AddRange(groups.SelectMany(group => group));
+                List<VideoItem> batchBroadcasts =
+                    groups
+                        .SelectMany(group => group)
+                        .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                        .Where(video => yieldedIds.Add(video.Id))
+                        .GroupBy(video => video.Id)
+                        .Select(group => group.First())
+                        .ToList();
+
+                if (batchBroadcasts.Count == 0)
+                {
+                    continue;
+                }
+
+                await TryEnrichVideosAsync(batchBroadcasts, cancellationToken);
+                await TryEnrichVideosFromWatchPagesAsync(batchBroadcasts, cancellationToken);
+
+                batchBroadcasts =
+                    batchBroadcasts
+                        .Where(video => video.IsEmbeddable)
+                        .OrderByDescending(video => video.IsLive)
+                        .ThenBy(video => video.IsPremiere)
+                        .ThenByDescending(GetPublishedAtSort)
+                        .ToList();
+
+                if (batchBroadcasts.Count > 0)
+                {
+                    yield return batchBroadcasts;
+                }
+            }
+        }
+
+        public async Task<List<VideoItem>> GetSubscribedBroadcastsAsync(
+            CancellationToken cancellationToken = default)
+        {
+            List<VideoItem> broadcasts = [];
+
+            await foreach (List<VideoItem> batch in GetSubscribedBroadcastBatchesAsync(cancellationToken))
+            {
+                broadcasts.AddRange(batch);
             }
 
-            List<VideoItem> distinctBroadcasts =
-                broadcasts
-                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
-                    .GroupBy(video => video.Id)
-                    .Select(group => group.First())
-                    .ToList();
-
-            await TryEnrichVideosAsync(distinctBroadcasts, cancellationToken);
-            await TryEnrichVideosFromWatchPagesAsync(distinctBroadcasts, cancellationToken);
-
-            return distinctBroadcasts
+            return broadcasts
+                .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                .GroupBy(video => video.Id)
+                .Select(group => group.First())
                 .Where(video => video.IsEmbeddable)
                 .OrderByDescending(video => video.IsLive)
                 .ThenBy(video => video.IsPremiere)
