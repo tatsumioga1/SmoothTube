@@ -283,6 +283,12 @@ This project is source-available for viewing and reference, but it is not open s
 
 If you want to contribute or collaborate, please contact the project owner first.
 
+## AI Assistance Disclosure
+
+Parts of SmoothTube were developed with AI-assisted coding support for debugging, refactoring, documentation, and implementation guidance. The project direction, feature decisions, testing, integration, and final code review were handled by the project maintainer.
+
+AI assistance does not change the project license, ownership, or usage restrictions.
+
 ## License
 
 SmoothTube is released as **source-available / all rights reserved**.
