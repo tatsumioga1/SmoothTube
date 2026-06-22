@@ -5,11 +5,17 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Media.Imaging;
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace SmoothTube.Controls
 {
     public sealed partial class VideoCardControl : UserControl
     {
+        private int thumbnailFallbackIndex;
+        private List<string> thumbnailFallbackUrls = [];
+
         public VideoCardControl()
         {
             InitializeComponent();
@@ -278,31 +284,102 @@ namespace SmoothTube.Controls
                 return;
             }
 
-            string thumbnail = Thumbnail?.StartsWith("//", StringComparison.Ordinal) == true
-                ? "https:" + Thumbnail
-                : Thumbnail ?? "";
+            thumbnailFallbackIndex = 0;
+            thumbnailFallbackUrls = BuildThumbnailFallbackUrls();
 
-            thumbnail = NormalizeYouTubeThumbnailUrl(thumbnail);
+            SetThumbnailFromFallbackList();
+        }
 
-            if (Uri.TryCreate(thumbnail, UriKind.Absolute, out Uri? uri) &&
-                (uri.Scheme == "https" ||
-                 uri.Scheme == "http" ||
-                 uri.Scheme == "ms-appx" ||
-                 uri.Scheme == "file"))
+        private void SetThumbnailFromFallbackList()
+        {
+            if (ThumbnailImage == null)
             {
-                ThumbnailImage.Source = new BitmapImage(uri)
-                {
-                    DecodePixelWidth = Math.Max(1, (int)CardWidth)
-
-                    // Important:
-                    // Do not set DecodePixelHeight here.
-                    // Setting both width and height can make odd YouTube thumbnails look forced/squashed.
-                };
-
                 return;
             }
 
+            while (thumbnailFallbackIndex < thumbnailFallbackUrls.Count)
+            {
+                string thumbnail = thumbnailFallbackUrls[thumbnailFallbackIndex];
+
+                if (Uri.TryCreate(thumbnail, UriKind.Absolute, out Uri? uri) &&
+                    (uri.Scheme == "https" ||
+                     uri.Scheme == "http" ||
+                     uri.Scheme == "ms-appx" ||
+                     uri.Scheme == "file"))
+                {
+                    ThumbnailImage.Source = new BitmapImage(uri)
+                    {
+                        DecodePixelWidth = Math.Max(1, (int)CardWidth)
+                    };
+
+                    return;
+                }
+
+                thumbnailFallbackIndex++;
+            }
+
             ThumbnailImage.Source = null;
+        }
+
+        private List<string> BuildThumbnailFallbackUrls()
+        {
+            List<string> urls = [];
+
+            string originalThumbnail = Thumbnail?.StartsWith("//", StringComparison.Ordinal) == true
+                ? "https:" + Thumbnail
+                : Thumbnail ?? "";
+
+            originalThumbnail = NormalizeYouTubeThumbnailUrl(originalThumbnail);
+
+            string videoId =
+                ExtractYouTubeVideoIdFromThumbnail(originalThumbnail);
+
+            bool looksLikeLiveThumbnail =
+                originalThumbnail.Contains("_live.", StringComparison.OrdinalIgnoreCase);
+
+            if (!string.IsNullOrWhiteSpace(videoId))
+            {
+                // Prefer true 16:9 YouTube thumbnails first.
+                // Some feed/API thumbnails are 4:3 variants such as default.jpg/mqdefault.jpg.
+                // Those load successfully, so ImageFailed never fires, but they create black bars.
+                if (looksLikeLiveThumbnail)
+                {
+                    urls.Add($"https://i.ytimg.com/vi/{videoId}/hq720_live.jpg");
+                    urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/hq720_live.webp");
+                    urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault_live.jpg");
+                    urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault_live.webp");
+                }
+
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/hq720.jpg");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/sddefault.jpg");
+
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault.webp");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/hq720.webp");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/sddefault.webp");
+            }
+
+            if (!string.IsNullOrWhiteSpace(originalThumbnail))
+            {
+                urls.Add(originalThumbnail);
+            }
+
+            if (!string.IsNullOrWhiteSpace(videoId))
+            {
+                // Last-resort variants. These can be 4:3, so keep them after 16:9 options.
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/hqdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/mqdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/default.jpg");
+
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/hqdefault.webp");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/mqdefault.webp");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/default.webp");
+            }
+
+            return urls
+                .Where(url => !string.IsNullOrWhiteSpace(url))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private static string NormalizeYouTubeThumbnailUrl(string value)
@@ -312,27 +389,56 @@ namespace SmoothTube.Controls
                 return value;
             }
 
+            value = value
+                .Replace(@"\u0026", "&", StringComparison.Ordinal)
+                .Replace(@"\u003d", "=", StringComparison.Ordinal)
+                .Replace(@"\/", "/", StringComparison.Ordinal)
+                .Replace(@"\u002F", "/", StringComparison.Ordinal);
+
             if (!value.Contains("ytimg.com/", StringComparison.OrdinalIgnoreCase))
             {
                 return value;
             }
 
             // Live thumbnails often come as hqdefault_live.jpg, which is more 4:3-ish.
-            // Prefer the 16:9 live version.
+            // Prefer the 16:9 live version first, then fallbacks will handle missing variants.
             value = value
                 .Replace("/default_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
                 .Replace("/mqdefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
                 .Replace("/hqdefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
-                .Replace("/sddefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase);
-
-            // Normal videos sometimes come as 4:3 thumbnails too.
-            value = value
-                .Replace("/default.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase)
-                .Replace("/mqdefault.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase)
-                .Replace("/hqdefault.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase)
-                .Replace("/sddefault.jpg", "/hq720.jpg", StringComparison.OrdinalIgnoreCase);
+                .Replace("/sddefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
+                .Replace("/default_live.webp", "/hq720_live.webp", StringComparison.OrdinalIgnoreCase)
+                .Replace("/mqdefault_live.webp", "/hq720_live.webp", StringComparison.OrdinalIgnoreCase)
+                .Replace("/hqdefault_live.webp", "/hq720_live.webp", StringComparison.OrdinalIgnoreCase)
+                .Replace("/sddefault_live.webp", "/hq720_live.webp", StringComparison.OrdinalIgnoreCase);
 
             return value;
+        }
+
+        private static string ExtractYouTubeVideoIdFromThumbnail(string thumbnail)
+        {
+            if (string.IsNullOrWhiteSpace(thumbnail))
+            {
+                return "";
+            }
+
+            Match match =
+                Regex.Match(
+                    thumbnail,
+                    @"/vi(?:_webp)?/(?<id>[^/]+)/",
+                    RegexOptions.IgnoreCase);
+
+            return match.Success
+                ? match.Groups["id"].Value
+                : "";
+        }
+
+        private void ThumbnailImage_ImageFailed(
+            object sender,
+            ExceptionRoutedEventArgs e)
+        {
+            thumbnailFallbackIndex++;
+            SetThumbnailFromFallbackList();
         }
 
         private void Card_PointerEntered(

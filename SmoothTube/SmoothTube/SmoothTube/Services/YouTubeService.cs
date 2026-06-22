@@ -28,7 +28,7 @@ namespace SmoothTube.Services
         private static List<VideoItem>? cachedSubscribedVideos;
         private static int cachedSubscribedVideosDays;
         private const string CachedSubscribedVideosFile = "subscription-videos.json";
-        private const int CachedSubscribedVideosVersion = 9;
+        private const int CachedSubscribedVideosVersion = 10;
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -475,7 +475,10 @@ namespace SmoothTube.Services
                         PublishedAtSort = item.Snippet?.PublishedAt,
                         IsLive = item.Snippet?.LiveBroadcastContent == "live",
                         IsEmbeddable = true,
-                        Thumbnail = NormalizeVideoThumbnailUrl(
+                        Thumbnail = GetBestVideoThumbnailUrl(
+                            item.Id?.VideoId ?? "",
+                            item.Snippet?.Thumbnails?.Maxres?.Url ??
+                            item.Snippet?.Thumbnails?.Standard?.Url ??
                             item.Snippet?.Thumbnails?.High?.Url ??
                             item.Snippet?.Thumbnails?.Medium?.Url ??
                             item.Snippet?.Thumbnails?.Default?.Url ??
@@ -757,7 +760,8 @@ namespace SmoothTube.Services
                 if (string.IsNullOrWhiteSpace(video.Thumbnail))
                 {
                     video.Thumbnail =
-                        NormalizeVideoThumbnailUrl(
+                        GetBestVideoThumbnailUrl(
+                            video.Id,
                             MatchBestYouTubeImageUrl(body, "i.ytimg.com"));
                 }
             }
@@ -815,8 +819,13 @@ namespace SmoothTube.Services
                         ? Decode(details.Snippet?.Title)
                         : video.Title;
 
-                video.Duration =
+                string formattedDuration =
                     FormatDuration(details.ContentDetails?.Duration);
+
+                if (!string.IsNullOrWhiteSpace(formattedDuration))
+                {
+                    video.Duration = formattedDuration;
+                }
 
                 video.Views =
                     FormatViewCount(details.Statistics?.ViewCount);
@@ -843,14 +852,19 @@ namespace SmoothTube.Services
                         ? Decode(details.Snippet?.Description)
                         : video.Description;
 
+                string apiThumbnail =
+                    details.Snippet?.Thumbnails?.Maxres?.Url ??
+                    details.Snippet?.Thumbnails?.Standard?.Url ??
+                    details.Snippet?.Thumbnails?.High?.Url ??
+                    details.Snippet?.Thumbnails?.Medium?.Url ??
+                    details.Snippet?.Thumbnails?.Default?.Url ??
+                    "";
+
                 video.Thumbnail =
-                    string.IsNullOrWhiteSpace(video.Thumbnail)
-                        ? NormalizeVideoThumbnailUrl(
-                            details.Snippet?.Thumbnails?.High?.Url ??
-                            details.Snippet?.Thumbnails?.Medium?.Url ??
-                            details.Snippet?.Thumbnails?.Default?.Url ??
-                            "")
-                        : NormalizeVideoThumbnailUrl(video.Thumbnail);
+                    GetBestVideoThumbnailUrl(
+                        video.Id,
+                        apiThumbnail,
+                        video.Thumbnail);
 
                 string liveBroadcastContent =
                     details.Snippet?.LiveBroadcastContent ?? "";
@@ -1115,58 +1129,40 @@ namespace SmoothTube.Services
                     FilterSubscribedVideos(
                         cachedSubscribedVideos,
                         maxAgeDays,
-                        includeShorts);
+                        includeShorts)
+                    .Where(video => !video.IsLive && !video.IsPremiere)
+                    .OrderByDescending(GetPublishedAtSort)
+                    .ToList();
 
                 if (cachedVideos.Count > 0)
+                {
                     yield return cachedVideos;
+                }
             }
 
             List<ChannelItem> subscriptions =
                 await GetSubscriptionsAsync(cancellationToken);
 
-            List<VideoItem> allVideos = [];
-
-            foreach (ChannelItem[] batch in subscriptions.Chunk(8))
-            {
-                List<VideoItem>[] groups =
-                    await Task.WhenAll(
-                        batch.Select(channel =>
-                            GetChannelSubscriptionVideosAsync(
-                                channel.Id,
-                                maxAgeDays,
-                                cancellationToken)));
-
-                List<VideoItem> batchVideos =
-                    groups
-                        .SelectMany(group => group)
-                        .Where(video => video.IsEmbeddable)
-                        .OrderByDescending(GetPublishedAtSort)
-                        .ToList();
-
-                await TryEnrichVideosAsync(
-                    batchVideos
-                        .Where(video => string.IsNullOrWhiteSpace(video.Duration))
-                        .Take(100)
-                        .ToList(),
+            List<VideoItem> allVideos =
+                await GetSubscribedVideosFromFeedsAsync(
+                    subscriptions,
+                    maxAgeDays,
                     cancellationToken);
 
-                // Do not run watch-page scraping during subscription feed loading.
-                // It is too heavy when multiplied across many subscribed channels.
-                //await TryEnrichVideosFromWatchPagesAsync(
-                //    batchVideos.Take(80),
-                //    cancellationToken);
+            allVideos =
+                allVideos
+                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                    .Where(video => video.IsEmbeddable)
+                    .GroupBy(video => video.Id)
+                    .Select(group => group.First())
+                    .OrderByDescending(GetPublishedAtSort)
+                    .ToList();
 
-                allVideos.AddRange(batchVideos);
-
-                batchVideos =
-                    FilterSubscribedVideos(
-                        batchVideos,
-                        maxAgeDays,
-                        includeShorts);
-
-                if (batchVideos.Count > 0)
-                    yield return batchVideos;
-            }
+            await TryEnrichVideosAsync(
+                allVideos
+                    .Take(100)
+                    .ToList(),
+                cancellationToken);
 
             cachedSubscribedVideos =
                 allVideos
@@ -1179,6 +1175,20 @@ namespace SmoothTube.Services
             SaveCachedSubscribedVideos(
                 cachedSubscribedVideos,
                 maxAgeDays);
+
+            List<VideoItem> finalVideos =
+                FilterSubscribedVideos(
+                    cachedSubscribedVideos,
+                    maxAgeDays,
+                    includeShorts)
+                .Where(video => !video.IsLive && !video.IsPremiere)
+                .OrderByDescending(GetPublishedAtSort)
+                .ToList();
+
+            if (finalVideos.Count > 0)
+            {
+                yield return finalVideos;
+            }
         }
 
         public async IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
@@ -1414,7 +1424,10 @@ namespace SmoothTube.Services
                                 channelId,
                             PublishedAt = FormatPublishedAt(snippet?.PublishedAt),
                             PublishedAtSort = snippet?.PublishedAt,
-                            Thumbnail = NormalizeVideoThumbnailUrl(
+                            Thumbnail = GetBestVideoThumbnailUrl(
+                                snippet?.ResourceId?.VideoId ?? "",
+                                snippet?.Thumbnails?.Maxres?.Url ??
+                                snippet?.Thumbnails?.Standard?.Url ??
                                 snippet?.Thumbnails?.High?.Url ??
                                 snippet?.Thumbnails?.Medium?.Url ??
                                 snippet?.Thumbnails?.Default?.Url ??
@@ -1560,7 +1573,8 @@ namespace SmoothTube.Services
                             Channel = Decode(entry.Element(atom + "author")?.Element(atom + "name")?.Value),
                             PublishedAt = FormatPublishedAt(publishedAt),
                             PublishedAtSort = publishedAt,
-                            Thumbnail = NormalizeVideoThumbnailUrl(
+                            Thumbnail = GetSafeVideoThumbnailUrl(
+                                entry.Element(yt + "videoId")?.Value ?? "",
                                 entry
                                     .Descendants(media + "thumbnail")
                                     .FirstOrDefault()?
@@ -1689,11 +1703,14 @@ namespace SmoothTube.Services
                                 ChannelId = item.Snippet?.ChannelId ?? channel.Id,
                                 PublishedAt = "Live now",
                                 PublishedAtSort = DateTimeOffset.Now,
-                                Thumbnail = NormalizeVideoThumbnailUrl(
-                                    item.Snippet?.Thumbnails?.High?.Url ??
-                                    item.Snippet?.Thumbnails?.Medium?.Url ??
-                                    item.Snippet?.Thumbnails?.Default?.Url ??
-                                    ""),
+                                Thumbnail = GetBestVideoThumbnailUrl(
+                            item.Id?.VideoId ?? "",
+                            item.Snippet?.Thumbnails?.Maxres?.Url ??
+                            item.Snippet?.Thumbnails?.Standard?.Url ??
+                            item.Snippet?.Thumbnails?.High?.Url ??
+                            item.Snippet?.Thumbnails?.Medium?.Url ??
+                            item.Snippet?.Thumbnails?.Default?.Url ??
+                            ""),
                                 IsLive = true,
                                 IsPremiere = false,
                                 IsEmbeddable = true,
@@ -1763,7 +1780,10 @@ namespace SmoothTube.Services
                         ChannelId = item.Snippet?.ChannelId ?? channelId,
                         PublishedAt = FormatPublishedAt(item.Snippet?.PublishedAt),
                         PublishedAtSort = item.Snippet?.PublishedAt,
-                        Thumbnail = NormalizeVideoThumbnailUrl(
+                        Thumbnail = GetBestVideoThumbnailUrl(
+                            item.Id?.VideoId ?? "",
+                            item.Snippet?.Thumbnails?.Maxres?.Url ??
+                            item.Snippet?.Thumbnails?.Standard?.Url ??
                             item.Snippet?.Thumbnails?.High?.Url ??
                             item.Snippet?.Thumbnails?.Medium?.Url ??
                             item.Snippet?.Thumbnails?.Default?.Url ??
@@ -1883,7 +1903,8 @@ namespace SmoothTube.Services
                         ChannelId = channelId,
                         PublishedAtSort = DateTimeOffset.Now,
                         PublishedAt = FormatPublishedAt(DateTimeOffset.Now),
-                        Thumbnail = NormalizeVideoThumbnailUrl(
+                        Thumbnail = GetBestVideoThumbnailUrl(
+                            videoId,
                             MatchBestYouTubeImageUrl(html, "i.ytimg.com")),
                         IsLive = isLive,
                         IsPremiere = isPremiere,
@@ -1971,7 +1992,8 @@ namespace SmoothTube.Services
                                 ? "Live now"
                                 : MatchJsonText(body, "publishedTimeText"),
                             PublishedAtSort = DateTimeOffset.Now,
-                            Thumbnail = NormalizeVideoThumbnailUrl(
+                            Thumbnail = GetBestVideoThumbnailUrl(
+                                videoId,
                                 MatchBestYouTubeImageUrl(body, "i.ytimg.com")),
                             IsLive = isLive,
                             IsPremiere = !isLive && isUpcoming,
@@ -2599,6 +2621,54 @@ namespace SmoothTube.Services
                 RegexOptions.IgnoreCase);
         }
 
+        private static string GetSafeVideoThumbnailUrl(
+            string videoId,
+            string candidate)
+        {
+            return GetBestVideoThumbnailUrl(
+                videoId,
+                candidate,
+                "");
+        }
+
+        private static string GetBestVideoThumbnailUrl(
+            string videoId,
+            string primaryCandidate,
+            string fallbackCandidate = "")
+        {
+            string primary =
+                NormalizeYouTubeImageUrl(primaryCandidate);
+
+            if (primary.StartsWith("//", StringComparison.Ordinal))
+            {
+                primary = "https:" + primary;
+            }
+
+            if (!string.IsNullOrWhiteSpace(primary))
+            {
+                return primary;
+            }
+
+            string fallback =
+                NormalizeYouTubeImageUrl(fallbackCandidate);
+
+            if (fallback.StartsWith("//", StringComparison.Ordinal))
+            {
+                fallback = "https:" + fallback;
+            }
+
+            if (!string.IsNullOrWhiteSpace(fallback))
+            {
+                return fallback;
+            }
+
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                return "";
+            }
+
+            return $"https://i.ytimg.com/vi/{videoId}/hqdefault.jpg";
+        }
         private static async Task<List<VideoItem>> TryGetInvidiousVideosAsync(
             string instance,
             string path,
@@ -2987,6 +3057,10 @@ namespace SmoothTube.Services
             public YouTubeThumbnail? Medium { get; set; }
 
             public YouTubeThumbnail? High { get; set; }
+
+            public YouTubeThumbnail? Standard { get; set; }
+
+            public YouTubeThumbnail? Maxres { get; set; }
         }
 
         private sealed class YouTubeThumbnail

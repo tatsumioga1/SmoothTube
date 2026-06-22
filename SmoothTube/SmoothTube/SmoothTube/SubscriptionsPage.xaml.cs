@@ -34,10 +34,11 @@ namespace SmoothTube
         private bool isLoading;
         private bool broadcastsLoaded;
         private bool broadcastsLoading;
-        private int loadedUploadDays = 1;
+        private int loadedUploadDays = 30;
         private CancellationTokenSource? loadCancellation;
 
-        private const int InitialUploadLimit = 15;
+        private const int InitialUploadLimit = 24;
+        private const int InitialUploadLookbackDays = 30;
 
         public SubscriptionsPage()
         {
@@ -110,7 +111,7 @@ namespace SmoothTube
                 ServiceLocator.YouTube.ClearSubscribedVideoCache();
             }
 
-            loadedUploadDays = 1;
+            loadedUploadDays = InitialUploadLookbackDays;
             loadedUploads.Clear();
             loadedBroadcasts.Clear();
 
@@ -163,12 +164,9 @@ namespace SmoothTube
             isLoading = true;
             LoadMoreButton.IsEnabled = false;
 
-            int startingCount = loadedUploads.Count;
-            int addedCount = 0;
-
             StatusText = append
-                ? $"Loading more uploads..."
-                : "Loading 15 recent subscription uploads...";
+                ? "Loading more recent uploads..."
+                : "Loading recent subscription uploads...";
 
             Bindings.Update();
 
@@ -191,36 +189,23 @@ namespace SmoothTube
                             .OrderByDescending(GetPublishedAtSort)
                             .ToList();
 
-                    int remaining =
-                        maxNewVideos == null
-                            ? int.MaxValue
-                            : Math.Max(0, maxNewVideos.Value - addedCount);
-
-                    uploadVideos =
-                        uploadVideos
-                            .Take(remaining)
-                            .ToList();
-
-                    int beforeMergeCount =
-                        loadedUploads.Count;
+                    if (maxNewVideos != null)
+                    {
+                        uploadVideos =
+                            uploadVideos
+                                .Take(maxNewVideos.Value)
+                                .ToList();
+                    }
 
                     MergeVideos(loadedUploads, uploadVideos);
+                    ApplyVisibleFilters();
 
-                    addedCount +=
-                        loadedUploads.Count - beforeMergeCount;
-
-                    ApplyVisibleFilters(true);
-
-                    if (maxNewVideos != null &&
-                        addedCount >= maxNewVideos.Value)
-                    {
-                        break;
-                    }
+                    break;
                 }
 
-                if (append && loadedUploads.Count == startingCount)
+                if (append && loadedUploads.Count == 0)
                 {
-                    StatusText = $"No more uploads found.";
+                    StatusText = "No more uploads found.";
                     Bindings.Update();
                 }
             }
