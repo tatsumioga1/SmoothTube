@@ -142,7 +142,9 @@ namespace SmoothTube.Controls
                 nameof(Progress),
                 typeof(double),
                 typeof(VideoCardControl),
-                new PropertyMetadata(0.0));
+                new PropertyMetadata(
+                    0.0,
+                    OnProgressChanged));
 
         public bool ShowProgress
         {
@@ -211,6 +213,16 @@ namespace SmoothTube.Controls
                 typeof(VideoCardControl),
                 new PropertyMetadata(Stretch.UniformToFill));
 
+        private static void OnProgressChanged(
+            DependencyObject d,
+            DependencyPropertyChangedEventArgs e)
+        {
+            if (d is VideoCardControl control)
+            {
+                control.UpdateProgressVisibility();
+            }
+        }
+
         private static void OnShowProgressChanged(
             DependencyObject d,
             DependencyPropertyChangedEventArgs e)
@@ -247,7 +259,7 @@ namespace SmoothTube.Controls
                 return;
 
             ProgressBarControl.Visibility =
-                ShowProgress
+                ShowProgress && Progress > 0 && Progress < 100
                     ? Visibility.Visible
                     : Visibility.Collapsed;
         }

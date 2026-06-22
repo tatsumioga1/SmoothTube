@@ -30,7 +30,11 @@
   <script>
     const params = new URLSearchParams(window.location.search);
     const videoId = params.get("videoId") || "";
+    const startSeconds = Math.max(0, Number(params.get("startSeconds") || 0));
+
     let idleTimer = 0;
+    let progressTimer = 0;
+    let resumeApplied = false;
 
     function resetCursorIdle() {
       document.body.classList.remove("idle");
@@ -44,12 +48,127 @@
     document.addEventListener("keydown", resetCursorIdle);
     resetCursorIdle();
 
+    function getPlayer() {
+      return window.player || window.ytPlayer || window.youtubePlayer || null;
+    }
+
+    function postMessage(payload) {
+      try {
+        window.chrome?.webview?.postMessage(JSON.stringify(payload));
+      } catch (_) {
+      }
+    }
+
+    function getPlayerSeconds() {
+      const player = getPlayer();
+
+      if (!player || typeof player.getCurrentTime !== "function") {
+        return { currentTime: 0, duration: 0 };
+      }
+
+      let currentTime = 0;
+      let duration = 0;
+
+      try {
+        currentTime = Number(player.getCurrentTime() || 0);
+      } catch (_) {
+      }
+
+      try {
+        if (typeof player.getDuration === "function") {
+          duration = Number(player.getDuration() || 0);
+        }
+      } catch (_) {
+      }
+
+      if (!Number.isFinite(currentTime)) {
+        currentTime = 0;
+      }
+
+      if (!Number.isFinite(duration)) {
+        duration = 0;
+      }
+
+      return { currentTime, duration };
+    }
+
+    function buildProgressPayload(type = "progress") {
+      const { currentTime, duration } = getPlayerSeconds();
+
+      return {
+        type,
+        videoId,
+        currentTime,
+        duration
+      };
+    }
+
+    function reportProgress(type = "progress") {
+      postMessage(buildProgressPayload(type));
+    }
+
+    window.__smoothTubeGetProgress = type => buildProgressPayload(type || "snapshot");
+
+    function applyResume() {
+      if (resumeApplied || startSeconds < 5) {
+        return;
+      }
+
+      const player = getPlayer();
+
+      if (!player || typeof player.seekTo !== "function") {
+        return;
+      }
+
+      try {
+        player.seekTo(startSeconds, true);
+        resumeApplied = true;
+        reportProgress("resumed");
+      } catch (_) {
+      }
+    }
+
+    function startProgressReporting() {
+      clearInterval(progressTimer);
+      progressTimer = setInterval(() => {
+        reportProgress("progress");
+      }, 3000);
+    }
+
+    window.__smoothTubeReportProgress = () => reportProgress("progress");
+    window.__smoothTubeApplyResume = seconds => {
+      const player = getPlayer();
+
+      if (!player || typeof player.seekTo !== "function") {
+        return false;
+      }
+
+      const value = Number(seconds || 0);
+
+      if (!Number.isFinite(value) || value < 5) {
+        return false;
+      }
+
+      try {
+        player.seekTo(value, true);
+        resumeApplied = true;
+        reportProgress("resumed");
+        return true;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    window.addEventListener("beforeunload", () => {
+      reportProgress("progress");
+    });
+
     function onYouTubeIframeAPIReady() {
       if (!videoId) {
         return;
       }
 
-      new YT.Player("player", {
+      window.player = new YT.Player("player", {
         width: "100%",
         height: "100%",
         videoId,
@@ -58,16 +177,39 @@
           playsinline: 1,
           rel: 0,
           modestbranding: 1,
-          origin: window.location.origin
+          origin: window.location.origin,
+          start: startSeconds >= 5 ? Math.floor(startSeconds) : undefined
         },
         events: {
+          onReady: () => {
+            window.ytPlayer = window.player;
+            window.youtubePlayer = window.player;
+            applyResume();
+            reportProgress("ready");
+            startProgressReporting();
+          },
           onStateChange: event => {
+            if (event.data === YT.PlayerState.PLAYING) {
+              applyResume();
+              reportProgress("playing");
+              startProgressReporting();
+            }
+
+            if (event.data === YT.PlayerState.PAUSED) {
+              reportProgress("paused");
+            }
+
             if (event.data === YT.PlayerState.ENDED) {
+              reportProgress("ended");
+              postMessage({ type: "ended" });
               window.chrome?.webview?.postMessage("ended");
             }
           }
         }
       });
+
+      window.ytPlayer = window.player;
+      window.youtubePlayer = window.player;
     }
   </script>
   <script src="https://www.youtube.com/iframe_api"></script>

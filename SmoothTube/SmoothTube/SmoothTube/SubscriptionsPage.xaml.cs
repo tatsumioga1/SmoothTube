@@ -32,10 +32,13 @@ namespace SmoothTube
 
         private bool isLoaded;
         private bool isLoading;
-        private bool broadcastsLoaded;
-        private bool broadcastsLoading;
+        private bool livestreamsLoaded;
+        private bool livestreamsLoading;
+        private bool premieresLoaded;
+        private bool premieresLoading;
         private int loadedUploadDays = 30;
         private CancellationTokenSource? loadCancellation;
+        private CancellationTokenSource? broadcastCancellation;
 
         private const int InitialUploadLimit = 24;
         private const int InitialUploadLookbackDays = 30;
@@ -91,7 +94,7 @@ namespace SmoothTube
             if (isLoading)
                 return;
 
-            loadedUploadDays++;
+            loadedUploadDays += 30;
 
             await LoadUploadRangeAsync(
                 loadedUploadDays,
@@ -103,6 +106,8 @@ namespace SmoothTube
         private async Task LoadVideosAsync(bool forceRefresh)
         {
             loadCancellation?.Cancel();
+            broadcastCancellation?.Cancel();
+
             loadCancellation = new CancellationTokenSource();
             CancellationToken cancellationToken = loadCancellation.Token;
 
@@ -115,14 +120,16 @@ namespace SmoothTube
             loadedUploads.Clear();
             loadedBroadcasts.Clear();
 
-            broadcastsLoaded = false;
-            broadcastsLoading = false;
+            livestreamsLoaded = false;
+            livestreamsLoading = false;
+            premieresLoaded = false;
+            premieresLoading = false;
 
             Videos.Clear();
             PremiereVideos.Clear();
             LivestreamVideos.Clear();
 
-            StatusText = "Loading 15 recent subscription uploads...";
+            StatusText = "Loading recent subscription uploads...";
             Bindings.Update();
 
             try
@@ -141,11 +148,6 @@ namespace SmoothTube
                         : FormatStatusText(false);
 
                 Bindings.Update();
-
-                // Important:
-                // Do NOT auto-load livestreams/premieres here.
-                // That scan is expensive and can hang the page.
-                // It will load only when the user clicks those tabs.
             }
             catch (TaskCanceledException)
             {
@@ -216,47 +218,144 @@ namespace SmoothTube
             }
         }
 
-        private async Task LoadBroadcastsAsync(CancellationToken cancellationToken)
+        private async Task LoadBroadcastsAsync(
+            string eventType,
+            CancellationToken cancellationToken)
         {
-            if (broadcastsLoading || broadcastsLoaded)
-                return;
+            bool isLiveScan =
+                eventType.Equals("live", StringComparison.OrdinalIgnoreCase);
 
-            broadcastsLoading = true;
+            if (isLiveScan)
+            {
+                if (livestreamsLoading)
+                {
+                    StatusText = "Livestream scan is currently running.";
+                    Bindings.Update();
+                    return;
+                }
 
-            StatusText = "Checking live and upcoming subscriptions...";
+                if (livestreamsLoaded)
+                {
+                    StatusText = "Livestream scan already completed.";
+                    Bindings.Update();
+                    return;
+                }
+
+                livestreamsLoading = true;
+            }
+            else
+            {
+                if (premieresLoading)
+                {
+                    StatusText = "Premiere scan is currently running.";
+                    Bindings.Update();
+                    return;
+                }
+
+                if (premieresLoaded)
+                {
+                    StatusText = "Premiere scan already completed.";
+                    Bindings.Update();
+                    return;
+                }
+
+                premieresLoading = true;
+            }
+
+            StatusText =
+                isLiveScan
+                    ? "Checking livestreams from subscribed channels..."
+                    : "Checking upcoming premieres from subscribed channels...";
+
             Bindings.Update();
+
+            int batchCount = 0;
+            int rawItemCount = 0;
 
             try
             {
                 await foreach (List<VideoItem> batch in
                     ServiceLocator.YouTube.GetSubscribedBroadcastBatchesAsync(
+                        eventType,
                         cancellationToken))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    MergeVideos(loadedBroadcasts, batch);
+                    batchCount++;
+                    rawItemCount += batch.Count;
 
+                    MergeVideos(loadedBroadcasts, batch);
                     ApplyVisibleFilters(true);
+
+                    StatusText =
+                        isLiveScan
+                            ? $"Checking livestreams... batches: {batchCount}, raw found: {rawItemCount}, visible: {LivestreamVideos.Count}"
+                            : $"Checking premieres... batches: {batchCount}, raw found: {rawItemCount}, visible: {PremiereVideos.Count}";
+
+                    Bindings.Update();
                 }
 
-                broadcastsLoaded = true;
+                bool quotaExhausted =
+                    ServiceLocator.YouTube.IsSearchQuotaExhausted;
+
+                if (quotaExhausted)
+                {
+                    StatusText =
+                        isLiveScan
+                            ? "Livestream scan stopped because the YouTube Search API quota is exhausted."
+                            : "Premiere scan stopped because the YouTube Search API quota is exhausted.";
+
+                    Bindings.Update();
+                    return;
+                }
+
+                if (isLiveScan)
+                {
+                    livestreamsLoaded = true;
+                }
+                else
+                {
+                    premieresLoaded = true;
+                }
+
                 ApplyVisibleFilters();
+
+                StatusText =
+                    isLiveScan
+                        ? $"Livestream scan complete. Found {LivestreamVideos.Count} livestreams."
+                        : $"Premiere scan complete. Found {PremiereVideos.Count} premieres.";
+
+                Bindings.Update();
             }
             catch (TaskCanceledException)
             {
-                throw;
+                StatusText =
+                    isLiveScan
+                        ? "Livestream scan cancelled."
+                        : "Premiere scan cancelled.";
+
+                Bindings.Update();
             }
             catch (Exception ex) when (ex is InvalidOperationException ||
                 ex is System.Runtime.InteropServices.COMException)
             {
                 StatusText =
-                    "Live and premiere checks failed. Try Refresh in a moment.";
+                    isLiveScan
+                        ? "Livestream check failed. Try Refresh in a moment."
+                        : "Premiere check failed. Try Refresh in a moment.";
 
                 Bindings.Update();
             }
             finally
             {
-                broadcastsLoading = false;
+                if (isLiveScan)
+                {
+                    livestreamsLoading = false;
+                }
+                else
+                {
+                    premieresLoading = false;
+                }
             }
         }
 
@@ -267,8 +366,17 @@ namespace SmoothTube
             if (!isLoaded || SubscriptionsPivot.SelectedIndex == 0)
                 return;
 
+            broadcastCancellation?.Cancel();
+            broadcastCancellation = new CancellationTokenSource();
+
+            string eventType =
+                SubscriptionsPivot.SelectedIndex == 1
+                    ? "upcoming"
+                    : "live";
+
             await LoadBroadcastsAsync(
-                loadCancellation?.Token ?? CancellationToken.None);
+                eventType,
+                broadcastCancellation.Token);
         }
 
         private void VideoCard_Tapped(

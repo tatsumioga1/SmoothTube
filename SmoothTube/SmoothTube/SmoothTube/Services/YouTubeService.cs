@@ -27,8 +27,11 @@ namespace SmoothTube.Services
         private static List<ChannelItem>? cachedSubscriptions;
         private static List<VideoItem>? cachedSubscribedVideos;
         private static int cachedSubscribedVideosDays;
+        private static bool searchQuotaExhausted;
+        public bool IsSearchQuotaExhausted => IsSearchQuotaCurrentlyExhausted();
+        private static DateTimeOffset? searchQuotaExhaustedAt;
         private const string CachedSubscribedVideosFile = "subscription-videos.json";
-        private const int CachedSubscribedVideosVersion = 10;
+        private const int CachedSubscribedVideosVersion = 12;
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -218,10 +221,23 @@ namespace SmoothTube.Services
 
             await TryEnrichVideosAsync(videos, cancellationToken);
 
+            if (string.IsNullOrWhiteSpace(videos[0].Duration))
+            {
+                await TryEnrichDurationsFromWatchPagesAsync(
+                    videos,
+                    cancellationToken);
+            }
+
             VideoItem video = videos[0];
-            return string.IsNullOrWhiteSpace(video.Title)
-                ? null
-                : video;
+
+            // Some Continue Watching entries already have title/channel info,
+            // but need duration enrichment. Do not discard a useful duration-only
+            // enrichment result just because the API did not return a title.
+            return string.IsNullOrWhiteSpace(video.Title) &&
+                string.IsNullOrWhiteSpace(video.Duration) &&
+                string.IsNullOrWhiteSpace(video.Thumbnail)
+                    ? null
+                    : video;
         }
 
         public async Task<bool> RateVideoAsync(
@@ -432,6 +448,32 @@ namespace SmoothTube.Services
         private static bool HasApiKey =>
             AppSettings.HasYouTubeApiKey;
 
+        private static bool IsSearchQuotaCurrentlyExhausted()
+        {
+            if (!searchQuotaExhausted)
+            {
+                return false;
+            }
+
+            if (searchQuotaExhaustedAt?.LocalDateTime.Date == DateTime.Now.Date)
+            {
+                return true;
+            }
+
+            searchQuotaExhausted = false;
+            searchQuotaExhaustedAt = null;
+            return false;
+        }
+
+        private static void MarkSearchQuotaExhausted()
+        {
+            searchQuotaExhausted = true;
+            searchQuotaExhaustedAt = DateTimeOffset.Now;
+
+            System.Diagnostics.Debug.WriteLine(
+                "YouTube search quota is exhausted. Broadcast scans will stop until the app is restarted or the quota resets.");
+        }
+
         private static async Task<List<VideoItem>> SearchYouTubeAsync(
             string query,
             CancellationToken cancellationToken)
@@ -519,6 +561,147 @@ namespace SmoothTube.Services
             {
             }
             catch (TaskCanceledException)
+            {
+            }
+        }
+
+        private static async Task EnsureDurationsAsync(
+            List<VideoItem> videos,
+            int maxVideos,
+            CancellationToken cancellationToken)
+        {
+            List<VideoItem> missingDurationVideos =
+                videos
+                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                    .Where(video => !video.IsLive && !video.IsPremiere)
+                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
+                    .Take(maxVideos)
+                    .ToList();
+
+            if (missingDurationVideos.Count == 0)
+            {
+                return;
+            }
+
+            System.Diagnostics.Debug.WriteLine(
+                $"Ensuring durations for {missingDurationVideos.Count} subscription videos via videos.list...");
+
+            await TryEnrichVideosAsync(
+                missingDurationVideos,
+                cancellationToken);
+
+            List<VideoItem> stillMissingDurationVideos =
+                missingDurationVideos
+                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                    .Where(video => !video.IsLive && !video.IsPremiere)
+                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
+                    .Take(maxVideos)
+                    .ToList();
+
+            if (stillMissingDurationVideos.Count == 0)
+            {
+                return;
+            }
+
+            System.Diagnostics.Debug.WriteLine(
+                $"Falling back to watch-page duration scrape for {stillMissingDurationVideos.Count} subscription videos...");
+
+            await TryEnrichDurationsFromWatchPagesAsync(
+                stillMissingDurationVideos,
+                cancellationToken);
+        }
+
+        private static async Task TryEnrichDurationsFromWatchPagesAsync(
+            IEnumerable<VideoItem> videos,
+            CancellationToken cancellationToken)
+        {
+            List<VideoItem> targets =
+                videos
+                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                    .Where(video => !video.IsLive && !video.IsPremiere)
+                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
+                    .Take(150)
+                    .ToList();
+
+            if (targets.Count == 0)
+            {
+                return;
+            }
+
+            using SemaphoreSlim gate = new(8);
+
+            Task[] tasks =
+                targets
+                    .Select(async video =>
+                    {
+                        await gate.WaitAsync(cancellationToken);
+
+                        try
+                        {
+                            await EnrichVideoDurationFromWatchPageAsync(
+                                video,
+                                cancellationToken);
+                        }
+                        finally
+                        {
+                            gate.Release();
+                        }
+                    })
+                    .ToArray();
+
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch (TaskCanceledException)
+            {
+            }
+        }
+
+        private static async Task EnrichVideoDurationFromWatchPageAsync(
+            VideoItem video,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                using HttpResponseMessage response =
+                    await HttpClient.GetAsync(
+                        "https://www.youtube.com/watch" +
+                        $"?v={Uri.EscapeDataString(video.Id)}" +
+                        "&bpctr=9999999999&has_verified=1",
+                        cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+
+                string body =
+                    await response.Content.ReadAsStringAsync(cancellationToken);
+
+                string lengthSeconds =
+                    MatchValue(
+                        body,
+                        @"""lengthSeconds"":""?(?<value>\d+)""?");
+
+                if (int.TryParse(
+                        lengthSeconds,
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out int totalSeconds))
+                {
+                    string duration =
+                        FormatDuration(totalSeconds);
+
+                    if (!string.IsNullOrWhiteSpace(duration))
+                    {
+                        video.Duration = duration;
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException ||
+                ex is TaskCanceledException ||
+                ex is RegexMatchTimeoutException)
             {
             }
         }
@@ -1108,10 +1291,24 @@ namespace SmoothTube.Services
             if (cachedSubscribedVideos != null &&
                 cachedSubscribedVideosDays >= maxAgeDays)
             {
-                yield return FilterSubscribedVideos(
-                    cachedSubscribedVideos,
-                    maxAgeDays,
-                    includeShorts);
+                List<VideoItem> cachedVideos =
+                    FilterSubscribedVideos(
+                        cachedSubscribedVideos,
+                        maxAgeDays,
+                        includeShorts)
+                    .Where(video => !video.IsLive && !video.IsPremiere)
+                    .OrderByDescending(GetPublishedAtSort)
+                    .ToList();
+
+                await EnsureDurationsAsync(
+                    cachedVideos,
+                    150,
+                    cancellationToken);
+
+                if (cachedVideos.Count > 0)
+                {
+                    yield return cachedVideos;
+                }
 
                 yield break;
             }
@@ -1134,10 +1331,18 @@ namespace SmoothTube.Services
                     .OrderByDescending(GetPublishedAtSort)
                     .ToList();
 
+                await EnsureDurationsAsync(
+                    cachedVideos,
+                    150,
+                    cancellationToken);
+
                 if (cachedVideos.Count > 0)
                 {
                     yield return cachedVideos;
                 }
+
+                // Keep refreshing below so stale cache gets replaced with fresh
+                // subscription data and enriched duration metadata.
             }
 
             List<ChannelItem> subscriptions =
@@ -1158,9 +1363,11 @@ namespace SmoothTube.Services
                     .OrderByDescending(GetPublishedAtSort)
                     .ToList();
 
+            // First pass: enrich enough raw feed videos so status, shorts,
+            // thumbnails, and basic duration metadata are improved.
             await TryEnrichVideosAsync(
                 allVideos
-                    .Take(100)
+                    .Take(150)
                     .ToList(),
                 cancellationToken);
 
@@ -1172,10 +1379,6 @@ namespace SmoothTube.Services
 
             cachedSubscribedVideosDays = maxAgeDays;
 
-            SaveCachedSubscribedVideos(
-                cachedSubscribedVideos,
-                maxAgeDays);
-
             List<VideoItem> finalVideos =
                 FilterSubscribedVideos(
                     cachedSubscribedVideos,
@@ -1185,6 +1388,18 @@ namespace SmoothTube.Services
                 .OrderByDescending(GetPublishedAtSort)
                 .ToList();
 
+            // Second pass: enrich the actual visible Recent Uploads candidates.
+            // This prevents Shorts/filtered items from consuming the first pass
+            // and leaving displayed cards without duration badges.
+            await EnsureDurationsAsync(
+                finalVideos,
+                150,
+                cancellationToken);
+
+            SaveCachedSubscribedVideos(
+                cachedSubscribedVideos,
+                maxAgeDays);
+
             if (finalVideos.Count > 0)
             {
                 yield return finalVideos;
@@ -1192,8 +1407,17 @@ namespace SmoothTube.Services
         }
 
         public async IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
+            string eventType = "all",
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            if (IsSearchQuotaCurrentlyExhausted())
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"Skipping subscribed broadcast scan for '{eventType}' because YouTube search quota is exhausted.");
+
+                yield break;
+            }
+
             List<ChannelItem> subscriptions =
                 await GetSubscriptionsAsync(cancellationToken);
 
@@ -1202,11 +1426,17 @@ namespace SmoothTube.Services
 
             foreach (ChannelItem[] batch in subscriptions.Chunk(4))
             {
+                if (IsSearchQuotaCurrentlyExhausted())
+                {
+                    yield break;
+                }
+
                 List<VideoItem>[] groups =
                     await Task.WhenAll(
                         batch.Select(channel =>
                             GetChannelBroadcastsForSubscriptionAsync(
                                 channel.Id,
+                                eventType,
                                 cancellationToken)));
 
                 List<VideoItem> batchBroadcasts =
@@ -1220,6 +1450,11 @@ namespace SmoothTube.Services
 
                 if (batchBroadcasts.Count == 0)
                 {
+                    if (IsSearchQuotaCurrentlyExhausted())
+                    {
+                        yield break;
+                    }
+
                     continue;
                 }
 
@@ -1241,12 +1476,13 @@ namespace SmoothTube.Services
             }
         }
 
+
         public async Task<List<VideoItem>> GetSubscribedBroadcastsAsync(
             CancellationToken cancellationToken = default)
         {
             List<VideoItem> broadcasts = [];
 
-            await foreach (List<VideoItem> batch in GetSubscribedBroadcastBatchesAsync(cancellationToken))
+            await foreach (List<VideoItem> batch in GetSubscribedBroadcastBatchesAsync("all", cancellationToken))
             {
                 broadcasts.AddRange(batch);
             }
@@ -1620,21 +1856,30 @@ namespace SmoothTube.Services
 
         private static async Task<List<VideoItem>> GetChannelBroadcastsForSubscriptionAsync(
             string channelId,
+            string eventType,
             CancellationToken cancellationToken)
         {
             List<VideoItem> broadcasts = [];
 
-            broadcasts.AddRange(
-                await GetChannelBroadcastsAsync(
-                    channelId,
-                    "live",
-                    cancellationToken));
+            if (eventType.Equals("live", StringComparison.OrdinalIgnoreCase) ||
+                eventType.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                broadcasts.AddRange(
+                    await GetChannelBroadcastsAsync(
+                        channelId,
+                        "live",
+                        cancellationToken));
+            }
 
-            broadcasts.AddRange(
-                await GetChannelBroadcastsAsync(
-                    channelId,
-                    "upcoming",
-                    cancellationToken));
+            if (eventType.Equals("upcoming", StringComparison.OrdinalIgnoreCase) ||
+                eventType.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                broadcasts.AddRange(
+                    await GetChannelBroadcastsAsync(
+                        channelId,
+                        "upcoming",
+                        cancellationToken));
+            }
 
             return broadcasts
                 .Where(video => !string.IsNullOrWhiteSpace(video.Id))
@@ -1736,8 +1981,11 @@ namespace SmoothTube.Services
             string eventType,
             CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(channelId))
+            if (string.IsNullOrWhiteSpace(channelId) ||
+                IsSearchQuotaCurrentlyExhausted())
+            {
                 return [];
+            }
 
             string requestUri =
                 "https://www.googleapis.com/youtube/v3/search" +
@@ -1753,7 +2001,23 @@ namespace SmoothTube.Services
                         cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
+                {
+                    string error =
+                        await response.Content.ReadAsStringAsync(cancellationToken);
+
+                    if (response.StatusCode == (HttpStatusCode)429 ||
+                        error.Contains("quotaExceeded", StringComparison.OrdinalIgnoreCase) ||
+                        error.Contains("rateLimitExceeded", StringComparison.OrdinalIgnoreCase) ||
+                        error.Contains("RESOURCE_EXHAUSTED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        MarkSearchQuotaExhausted();
+                    }
+
+                    System.Diagnostics.Debug.WriteLine(
+                        $"Broadcast search failed | Channel: {channelId} | EventType: {eventType} | Status: {(int)response.StatusCode} {response.ReasonPhrase} | Error: {error}");
+
                     return [];
+                }
 
                 await using var contentStream =
                     await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -1763,6 +2027,9 @@ namespace SmoothTube.Services
                         contentStream,
                         JsonOptions,
                         cancellationToken);
+
+                System.Diagnostics.Debug.WriteLine(
+                    $"Broadcast search success | Channel: {channelId} | EventType: {eventType} | Items: {searchResponse?.Items?.Count ?? 0}");
 
                 bool isLive =
                     eventType.Equals("live", StringComparison.OrdinalIgnoreCase);
@@ -1795,8 +2062,11 @@ namespace SmoothTube.Services
                     })
                     .ToList() ?? [];
             }
-            catch (HttpRequestException)
+            catch (HttpRequestException ex)
             {
+                System.Diagnostics.Debug.WriteLine(
+                    $"Broadcast search HTTP exception | Channel: {channelId} | EventType: {eventType} | Error: {ex.Message}");
+
                 return [];
             }
             catch (JsonException)
@@ -1808,6 +2078,7 @@ namespace SmoothTube.Services
                 return [];
             }
         }
+
 
         private static async Task<List<VideoItem>> GetChannelLivePageBroadcastsAsync(
             string channelId,

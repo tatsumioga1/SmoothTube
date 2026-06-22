@@ -70,10 +70,13 @@ namespace SmoothTube.Services
             CancellationToken cancellationToken = default);
 
         IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
+            string eventType = "all",
             CancellationToken cancellationToken = default);
 
         Task<List<VideoItem>> GetSubscribedBroadcastsAsync(
             CancellationToken cancellationToken = default);
+
+        bool IsSearchQuotaExhausted { get; }
 
         void ClearSubscribedVideoCache();
 

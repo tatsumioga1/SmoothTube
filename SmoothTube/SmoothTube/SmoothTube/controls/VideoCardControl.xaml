@@ -110,6 +110,15 @@
 
                     </Border>
 
+                    <ProgressBar
+                        x:Name="ProgressBarControl"
+                        Margin="8,0,8,4"
+                        Height="4"
+                        Minimum="0"
+                        Maximum="100"
+                        VerticalAlignment="Bottom"
+                        Value="{Binding Progress, ElementName=Root}" />
+
                 </Grid>
 
             </Border>
@@ -137,14 +146,6 @@
                     Text="{Binding Views, ElementName=Root}"
                     Opacity="0.75"
                     FontSize="12" />
-
-                <ProgressBar
-                    x:Name="ProgressBarControl"
-                    Margin="0,8,0,0"
-                    Height="4"
-                    Minimum="0"
-                    Maximum="100"
-                    Value="{Binding Progress, ElementName=Root}" />
 
             </StackPanel>
 

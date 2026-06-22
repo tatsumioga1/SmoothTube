@@ -36,6 +36,12 @@ namespace SmoothTube.Models
 
         public double Progress { get; set; }
 
+        public double ResumeSeconds { get; set; }
+
+        public double DurationSeconds { get; set; }
+
+        public System.DateTimeOffset? LastWatchedAt { get; set; }
+
         public string Category { get; set; } = "";
     }
 }

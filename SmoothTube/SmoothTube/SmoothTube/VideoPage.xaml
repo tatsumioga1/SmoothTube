@@ -69,7 +69,8 @@
                             <Grid x:Name="MockPlayerGrid">
 
                                 <Image
-                                    Source="{Binding Thumbnail}"
+                                    x:Name="MockThumbnailImage"
+                                    Loaded="MockThumbnailImage_Loaded"
                                     Stretch="Uniform"
                                     Opacity="0.5"/>
 

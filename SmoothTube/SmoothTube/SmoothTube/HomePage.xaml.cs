@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Navigation;
 using SmoothTube.Models;
 using SmoothTube.Services;
 using System.Collections.ObjectModel;
@@ -32,6 +33,19 @@ namespace SmoothTube
 
         private bool isLoadingMore;
 
+        private bool hasLoadedOnce;
+
+        protected override async void OnNavigatedTo(
+            NavigationEventArgs e)
+        {
+            base.OnNavigatedTo(e);
+
+            if (hasLoadedOnce)
+            {
+                await RefreshContinueWatchingAsync();
+            }
+        }
+
         public HomePage()
         {
             InitializeComponent();
@@ -46,6 +60,25 @@ namespace SmoothTube
             await LoadVideosAsync();
         }
 
+        private async Task RefreshContinueWatchingAsync()
+        {
+            List<VideoItem> continueWatchingVideos =
+                WatchHistoryService.GetContinueWatching();
+
+            await EnrichContinueWatchingVideosAsync(continueWatchingVideos);
+
+            ReplaceVideos(
+                ContinueWatchingVideos,
+                continueWatchingVideos);
+
+            ContinueWatchingVisibility =
+                ContinueWatchingVideos.Count > 0
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+
+            Bindings.Update();
+        }
+
         private async Task LoadVideosAsync()
         {
             StatusText = "Loading videos...";
@@ -54,14 +87,7 @@ namespace SmoothTube
 
             PrimarySectionTitle = "Recommended";
 
-            ReplaceVideos(
-                ContinueWatchingVideos,
-                WatchHistoryService.GetContinueWatching());
-
-            ContinueWatchingVisibility =
-                ContinueWatchingVideos.Count > 0
-                    ? Visibility.Visible
-                    : Visibility.Collapsed;
+            await RefreshContinueWatchingAsync();
 
             if (SkeletonItems.Count == 0)
             {
@@ -99,6 +125,7 @@ namespace SmoothTube
                 LoadMoreVisibility = VideosVisibility;
             }
 
+            hasLoadedOnce = true;
             Bindings.Update();
         }
 
@@ -141,6 +168,78 @@ namespace SmoothTube
             isLoadingMore = false;
             LoadMoreVisibility = Visibility.Visible;
             Bindings.Update();
+        }
+
+
+        private static async Task EnrichContinueWatchingVideosAsync(
+            List<VideoItem> videos)
+        {
+            List<VideoItem> targets =
+                videos
+                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
+                    .Where(video =>
+                        string.IsNullOrWhiteSpace(video.Duration) ||
+                        string.IsNullOrWhiteSpace(video.Thumbnail) ||
+                        string.IsNullOrWhiteSpace(video.Channel))
+                    .Take(10)
+                    .ToList();
+
+            if (targets.Count == 0)
+            {
+                return;
+            }
+
+            Task<VideoItem?>[] tasks =
+                targets
+                    .Select(video =>
+                        ServiceLocator.YouTube.GetVideoAsync(video.Id))
+                    .ToArray();
+
+            VideoItem?[] enrichedVideos;
+
+            try
+            {
+                enrichedVideos = await Task.WhenAll(tasks);
+            }
+            catch
+            {
+                return;
+            }
+
+            foreach (VideoItem target in targets)
+            {
+                VideoItem? enriched =
+                    enrichedVideos.FirstOrDefault(video => video?.Id == target.Id);
+
+                if (enriched == null)
+                {
+                    continue;
+                }
+
+                double progress = target.Progress;
+                double resumeSeconds = target.ResumeSeconds;
+                double durationSeconds = target.DurationSeconds;
+
+                target.Title = string.IsNullOrWhiteSpace(target.Title) ? enriched.Title : target.Title;
+                target.Channel = string.IsNullOrWhiteSpace(target.Channel) ? enriched.Channel : target.Channel;
+                target.ChannelId = string.IsNullOrWhiteSpace(target.ChannelId) ? enriched.ChannelId : target.ChannelId;
+                target.Views = string.IsNullOrWhiteSpace(target.Views) ? enriched.Views : target.Views;
+                target.Duration = string.IsNullOrWhiteSpace(target.Duration) ? enriched.Duration : target.Duration;
+                target.PublishedAt = string.IsNullOrWhiteSpace(target.PublishedAt) ? enriched.PublishedAt : target.PublishedAt;
+                target.Thumbnail = string.IsNullOrWhiteSpace(target.Thumbnail) ? enriched.Thumbnail : target.Thumbnail;
+                target.IsEmbeddable = target.IsEmbeddable || enriched.IsEmbeddable;
+                target.IsLive = enriched.IsLive;
+                target.IsPremiere = enriched.IsPremiere;
+                target.IsShort = target.IsShort || enriched.IsShort;
+                target.LiveChatId = enriched.LiveChatId;
+
+                target.Progress = progress;
+                target.ResumeSeconds = resumeSeconds;
+                target.DurationSeconds = durationSeconds;
+
+                WatchHistoryService.UpdateMetadata(target);
+                WatchHistoryService.ApplySavedProgress(target);
+            }
         }
 
         private static void ReplaceVideosIfAny(

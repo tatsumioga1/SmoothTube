@@ -7,9 +7,11 @@ using SmoothTube.Models;
 using SmoothTube.Services;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI;
@@ -37,6 +39,10 @@ namespace SmoothTube
         private bool isPlayerFullScreen;
         private bool playerEventsAttached;
         private bool descriptionExpanded;
+        private DispatcherTimer? progressTimer;
+        private bool isStoppingPlayback;
+        private DateTimeOffset? playbackStartedAt;
+        private double playbackStartedResumeSeconds;
 
         public VideoPage()
         {
@@ -57,6 +63,7 @@ namespace SmoothTube
             if (e.Parameter is VideoNavigationData data)
             {
                 CurrentVideo = data.CurrentVideo;
+                EnsureCurrentVideoDefaults();
 
                 AllVideos = data.AllVideos;
 
@@ -70,7 +77,9 @@ namespace SmoothTube
                 UpdateChannelButtonVisibility();
                 _ = UpdateSubscriptionButtonAsync();
                 _ = UpdateRatingStateAsync();
+                WatchHistoryService.ApplySavedProgress(CurrentVideo);
                 WatchHistoryService.RecordStarted(CurrentVideo);
+                RefreshCurrentVideoBindings();
                 _ = EnrichCurrentVideoAsync();
                 _ = UpdatePlayerSourceAsync();
                 _ = LoadSocialDataAsync();
@@ -79,17 +88,55 @@ namespace SmoothTube
             {
                 AllVideos = VideoCatalog.GetAll();
                 CurrentVideo = AllVideos.FirstOrDefault() ?? new VideoItem();
+                EnsureCurrentVideoDefaults();
                 RecommendedVideos = AllVideos.Skip(1).ToList();
                 DataContext = CurrentVideo;
                 ApplyLiveChatLayout();
                 UpdateChannelButtonVisibility();
                 _ = UpdateSubscriptionButtonAsync();
                 _ = UpdateRatingStateAsync();
+                WatchHistoryService.ApplySavedProgress(CurrentVideo);
                 WatchHistoryService.RecordStarted(CurrentVideo);
+                RefreshCurrentVideoBindings();
                 _ = EnrichCurrentVideoAsync();
                 _ = UpdatePlayerSourceAsync();
                 _ = LoadSocialDataAsync();
             }
+        }
+
+        private void EnsureCurrentVideoDefaults()
+        {
+            if (CurrentVideo == null)
+            {
+                CurrentVideo = new VideoItem();
+            }
+
+            if (string.IsNullOrWhiteSpace(CurrentVideo.Category) &&
+                !string.IsNullOrWhiteSpace(CurrentVideo.Id))
+            {
+                CurrentVideo.Category = "YouTube";
+            }
+
+            if (CurrentVideo.Category == "YouTube" &&
+                !string.IsNullOrWhiteSpace(CurrentVideo.Id))
+            {
+                CurrentVideo.IsEmbeddable = true;
+            }
+
+            if (string.IsNullOrWhiteSpace(CurrentVideo.Title) &&
+                !string.IsNullOrWhiteSpace(CurrentVideo.Id))
+            {
+                CurrentVideo.Title = "YouTube video";
+            }
+        }
+
+        private void RefreshCurrentVideoBindings()
+        {
+            DataContext = null;
+            DataContext = CurrentVideo;
+            ApplyLiveChatLayout();
+            UpdateChannelButtonVisibility();
+            Bindings.Update();
         }
 
         private void UpNextVideo_Tapped(
@@ -103,10 +150,14 @@ namespace SmoothTube
             }
         }
 
-        private void BackButton_Click(
+        private async void BackButton_Click(
             object sender,
             RoutedEventArgs e)
         {
+            // Save a synchronous fallback first so Home can immediately read the new progress
+            // even if WebView2 refuses a final JavaScript snapshot while navigating away.
+            RecordApproximatePlaybackProgress(forceVisibleProgress: true);
+            await RequestProgressSnapshotAsync();
             StopPlayback();
 
             if (Frame.CanGoBack)
@@ -364,8 +415,23 @@ namespace SmoothTube
                 PlayerWebView.CoreWebView2.ContainsFullScreenElementChanged +=
                     CoreWebView2_ContainsFullScreenElementChanged;
 
+                double resumeSeconds =
+                    CurrentVideo.IsLive || CurrentVideo.IsPremiere
+                        ? 0
+                        : Math.Max(
+                            CurrentVideo.ResumeSeconds,
+                            WatchHistoryService.GetResumeSeconds(CurrentVideo.Id));
+
+                string startParameter =
+                    resumeSeconds >= 5
+                        ? $"&startSeconds={Math.Floor(resumeSeconds).ToString(CultureInfo.InvariantCulture)}"
+                        : "";
+
+                playbackStartedAt = DateTimeOffset.Now;
+                playbackStartedResumeSeconds = resumeSeconds;
+
                 PlayerWebView.CoreWebView2.Navigate(
-                    $"https://smoothtube.local/youtube-player.html?videoId={videoId}");
+                    $"https://smoothtube.local/youtube-player.html?videoId={videoId}{startParameter}");
             }
         }
 
@@ -387,12 +453,23 @@ namespace SmoothTube
             if (playerHostMapped)
                 return;
 
+            string rootPlayerPath =
+                Path.Combine(AppContext.BaseDirectory, "youtube-player.html");
+
             string assetsPath =
                 Path.Combine(AppContext.BaseDirectory, "Assets");
 
+            string mappedPath =
+                File.Exists(rootPlayerPath)
+                    ? AppContext.BaseDirectory
+                    : assetsPath;
+
+            System.Diagnostics.Debug.WriteLine(
+                $"SmoothTube player host mapped to: {mappedPath}");
+
             PlayerWebView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 "smoothtube.local",
-                assetsPath,
+                mappedPath,
                 CoreWebView2HostResourceAccessKind.Allow);
 
             playerHostMapped = true;
@@ -422,14 +499,122 @@ namespace SmoothTube
             CoreWebView2 sender,
             CoreWebView2WebMessageReceivedEventArgs args)
         {
-            string message = args.TryGetWebMessageAsString();
+            string message;
 
-            if (message == "ended" &&
-                AutoPlayUpNextSwitch.IsOn &&
-                RecommendedVideos.Count > 0)
+            try
             {
-                NavigateToVideo(RecommendedVideos[0]);
+                message = args.TryGetWebMessageAsString();
             }
+            catch (ArgumentException)
+            {
+                message = args.WebMessageAsJson;
+            }
+
+            if (message == "ended")
+            {
+                WatchHistoryService.RecordCompleted(CurrentVideo);
+
+                if (AutoPlayUpNextSwitch.IsOn &&
+                    RecommendedVideos.Count > 0)
+                {
+                    NavigateToVideo(RecommendedVideos[0]);
+                }
+
+                return;
+            }
+
+            HandlePlayerProgressMessage(message);
+        }
+
+        private void HandlePlayerProgressMessage(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            try
+            {
+                using JsonDocument document =
+                    JsonDocument.Parse(message);
+
+                JsonElement root = document.RootElement;
+
+                if (root.ValueKind == JsonValueKind.String)
+                {
+                    string nested = root.GetString() ?? "";
+
+                    if (string.IsNullOrWhiteSpace(nested) ||
+                        nested == message)
+                    {
+                        return;
+                    }
+
+                    HandlePlayerProgressMessage(nested);
+                    return;
+                }
+
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    return;
+                }
+
+                string type =
+                    root.TryGetProperty("type", out JsonElement typeElement)
+                        ? typeElement.GetString() ?? ""
+                        : "";
+
+                if (type.Equals("ended", StringComparison.OrdinalIgnoreCase))
+                {
+                    WatchHistoryService.RecordCompleted(CurrentVideo);
+                    return;
+                }
+
+                double currentSeconds =
+                    GetJsonDouble(root, "currentTime");
+
+                double durationSeconds =
+                    GetJsonDouble(root, "duration");
+
+                if (currentSeconds <= 0 ||
+                    CurrentVideo.IsLive ||
+                    CurrentVideo.IsPremiere)
+                {
+                    return;
+                }
+
+                System.Diagnostics.Debug.WriteLine(
+                    $"SmoothTube progress message | Video: {CurrentVideo.Id} | Current: {currentSeconds} | Duration: {durationSeconds} | Type: {type}");
+
+                WatchHistoryService.RecordProgress(
+                    CurrentVideo,
+                    currentSeconds,
+                    durationSeconds);
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        private static double GetJsonDouble(
+            JsonElement root,
+            string propertyName)
+        {
+            if (!root.TryGetProperty(propertyName, out JsonElement element))
+            {
+                return 0;
+            }
+
+            return element.ValueKind switch
+            {
+                JsonValueKind.Number => element.GetDouble(),
+                JsonValueKind.String when double.TryParse(
+                    element.GetString(),
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out double value) => value,
+                _ => 0
+            };
         }
 
         private void CoreWebView2_NewWindowRequested(
@@ -622,12 +807,24 @@ namespace SmoothTube
 
         private void StopPlayback()
         {
+            if (isStoppingPlayback)
+            {
+                return;
+            }
+
+            isStoppingPlayback = true;
+
             try
             {
+                progressTimer?.Stop();
+                progressTimer = null;
+                RecordApproximatePlaybackProgress();
+                _ = RequestProgressSnapshotAsync();
+
                 if (PlayerWebView.CoreWebView2 != null)
                 {
                     _ = PlayerWebView.ExecuteScriptAsync(
-                        "document.querySelector('video')?.pause();");
+                        "if (window.__smoothTubeReportProgress) { window.__smoothTubeReportProgress(); } document.querySelector('video')?.pause();");
 
                     PlayerWebView.CoreWebView2.Navigate("about:blank");
                 }
@@ -639,6 +836,10 @@ namespace SmoothTube
             catch (InvalidOperationException)
             {
             }
+            finally
+            {
+                isStoppingPlayback = false;
+            }
 
             ApplyPlayerFullScreen(false);
         }
@@ -647,7 +848,296 @@ namespace SmoothTube
             WebView2 sender,
             CoreWebView2NavigationCompletedEventArgs args)
         {
-            await Task.CompletedTask;
+            if (!args.IsSuccess ||
+                PlayerWebView.CoreWebView2 == null ||
+                PlayerWebView.Source?.ToString().Contains(
+                    "smoothtube.local/youtube-player.html",
+                    StringComparison.OrdinalIgnoreCase) != true)
+            {
+                return;
+            }
+
+            await InstallPlayerProgressBridgeAsync();
+            StartProgressTimer();
+        }
+
+        private async Task InstallPlayerProgressBridgeAsync()
+        {
+            if (PlayerWebView.CoreWebView2 == null ||
+                CurrentVideo.IsLive ||
+                CurrentVideo.IsPremiere)
+            {
+                return;
+            }
+
+            double resumeSeconds =
+                Math.Max(
+                    CurrentVideo.ResumeSeconds,
+                    WatchHistoryService.GetResumeSeconds(CurrentVideo.Id));
+
+            string resumeText =
+                resumeSeconds.ToString(CultureInfo.InvariantCulture);
+
+            string script =
+                $@"(() => {{
+                    const resumeSeconds = {resumeText};
+
+                    function getPlayer() {{
+                        return window.player || window.ytPlayer || window.youtubePlayer || null;
+                    }}
+
+                    function reportProgress(type) {{
+                        try {{
+                            const player = getPlayer();
+
+                            if (!player || typeof player.getCurrentTime !== 'function') {{
+                                return;
+                            }}
+
+                            const currentTime = Number(player.getCurrentTime() || 0);
+                            const duration =
+                                typeof player.getDuration === 'function'
+                                    ? Number(player.getDuration() || 0)
+                                    : 0;
+
+                            if (window.chrome && window.chrome.webview) {{
+                                window.chrome.webview.postMessage(JSON.stringify({{
+                                    type: type || 'progress',
+                                    currentTime,
+                                    duration
+                                }}));
+                            }}
+                        }} catch (error) {{
+                        }}
+                    }}
+
+                    function applyResume(seconds) {{
+                        try {{
+                            if (!seconds || seconds < 5 || window.__smoothTubeResumeApplied) {{
+                                return false;
+                            }}
+
+                            const player = getPlayer();
+
+                            if (!player || typeof player.seekTo !== 'function') {{
+                                return false;
+                            }}
+
+                            player.seekTo(seconds, true);
+                            window.__smoothTubeResumeApplied = true;
+                            reportProgress('resumed');
+                            return true;
+                        }} catch (error) {{
+                            return false;
+                        }}
+                    }}
+
+                    window.__smoothTubeReportProgress = () => reportProgress('progress');
+                    window.__smoothTubeApplyResume = applyResume;
+
+                    if (!window.__smoothTubeProgressBridgeInstalled) {{
+                        window.__smoothTubeProgressBridgeInstalled = true;
+
+                        window.addEventListener('beforeunload', () => {{
+                            reportProgress('progress');
+                        }});
+
+                        setInterval(() => {{
+                            reportProgress('progress');
+                        }}, 5000);
+                    }}
+
+                    const resumeInterval = setInterval(() => {{
+                        if (applyResume(resumeSeconds)) {{
+                            clearInterval(resumeInterval);
+                        }}
+                    }}, 500);
+
+                    setTimeout(() => {{
+                        clearInterval(resumeInterval);
+                    }}, 15000);
+                }})();";
+
+            try
+            {
+                await PlayerWebView.ExecuteScriptAsync(script);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (COMException)
+            {
+            }
+        }
+
+        private void StartProgressTimer()
+        {
+            progressTimer?.Stop();
+
+            if (CurrentVideo.IsLive ||
+                CurrentVideo.IsPremiere)
+            {
+                return;
+            }
+
+            progressTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(5)
+            };
+
+            progressTimer.Tick += async (_, _) =>
+            {
+                await RequestProgressSnapshotAsync();
+                RecordApproximatePlaybackProgress();
+            };
+
+            progressTimer.Start();
+        }
+
+        private void RecordApproximatePlaybackProgress(bool forceVisibleProgress = false)
+        {
+            if (CurrentVideo.IsLive ||
+                CurrentVideo.IsPremiere ||
+                playbackStartedAt == null ||
+                string.IsNullOrWhiteSpace(CurrentVideo.Id))
+            {
+                return;
+            }
+
+            double elapsedSeconds =
+                Math.Max(0, (DateTimeOffset.Now - playbackStartedAt.Value).TotalSeconds);
+
+            double currentSeconds =
+                Math.Max(0, playbackStartedResumeSeconds + elapsedSeconds);
+
+            if (currentSeconds < 5 && !forceVisibleProgress)
+            {
+                return;
+            }
+
+            if (forceVisibleProgress && currentSeconds < 5)
+            {
+                currentSeconds = 5;
+            }
+
+            double durationSeconds =
+                CurrentVideo.DurationSeconds > 0
+                    ? CurrentVideo.DurationSeconds
+                    : ParseDurationSeconds(CurrentVideo.Duration);
+
+            System.Diagnostics.Debug.WriteLine(
+                $"SmoothTube approximate progress | Video: {CurrentVideo.Id} | Current: {currentSeconds} | Duration: {durationSeconds}");
+
+            WatchHistoryService.RecordProgress(
+                CurrentVideo,
+                currentSeconds,
+                durationSeconds);
+        }
+
+        private static double ParseDurationSeconds(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return 0;
+            }
+
+            string[] parts =
+                value
+                    .Trim()
+                    .Split(':', StringSplitOptions.RemoveEmptyEntries);
+
+            if (parts.Length == 0 || parts.Length > 3)
+            {
+                return 0;
+            }
+
+            double totalSeconds = 0;
+
+            foreach (string part in parts)
+            {
+                if (!int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
+                {
+                    return 0;
+                }
+
+                totalSeconds = totalSeconds * 60 + parsed;
+            }
+
+            return totalSeconds;
+        }
+
+        private async Task RequestProgressSnapshotAsync()
+        {
+            if (PlayerWebView?.CoreWebView2 == null ||
+                CurrentVideo.IsLive ||
+                CurrentVideo.IsPremiere)
+            {
+                return;
+            }
+
+            try
+            {
+                string result = await PlayerWebView.ExecuteScriptAsync(
+                    "JSON.stringify(window.__smoothTubeGetProgress ? window.__smoothTubeGetProgress('snapshot') : null)");
+
+                if (!string.IsNullOrWhiteSpace(result) &&
+                    result != "null")
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"SmoothTube snapshot result for {CurrentVideo.Id}: {result}");
+
+                    HandlePlayerProgressMessage(result);
+                    return;
+                }
+
+                await PlayerWebView.ExecuteScriptAsync(
+                    "if (window.__smoothTubeReportProgress) { window.__smoothTubeReportProgress(); }");
+            }
+            catch (InvalidOperationException ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"SmoothTube snapshot skipped: {ex.Message}");
+            }
+            catch (COMException ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"SmoothTube snapshot failed: {ex.Message}");
+            }
+        }
+
+
+        private void MockThumbnailImage_Loaded(
+            object sender,
+            RoutedEventArgs e)
+        {
+            if (sender is not Image image)
+            {
+                return;
+            }
+
+            string thumbnail = "";
+
+            if (image.DataContext is VideoItem video)
+            {
+                thumbnail = video.Thumbnail;
+            }
+
+            if (string.IsNullOrWhiteSpace(thumbnail))
+            {
+                thumbnail = CurrentVideo?.Thumbnail ?? "";
+            }
+
+            if (thumbnail.StartsWith("//", StringComparison.Ordinal))
+            {
+                thumbnail = "https:" + thumbnail;
+            }
+
+            if (Uri.TryCreate(thumbnail, UriKind.Absolute, out Uri? uri) &&
+                (uri.Scheme == "https" ||
+                 uri.Scheme == "http" ||
+                 uri.Scheme == "ms-appx" ||
+                 uri.Scheme == "file"))
+            {
+                image.Source = new BitmapImage(uri);
+            }
         }
 
         private async void RefreshLiveChat_Click(
@@ -836,26 +1326,77 @@ namespace SmoothTube
             if (enrichedVideo == null)
                 return;
 
-            CurrentVideo.Title = enrichedVideo.Title;
-            CurrentVideo.Channel = enrichedVideo.Channel;
-            CurrentVideo.ChannelId = enrichedVideo.ChannelId;
-            CurrentVideo.Views = enrichedVideo.Views;
-            CurrentVideo.Likes = enrichedVideo.Likes;
-            CurrentVideo.Duration = enrichedVideo.Duration;
-            CurrentVideo.PublishedAt = enrichedVideo.PublishedAt;
-            CurrentVideo.Thumbnail = enrichedVideo.Thumbnail;
-            CurrentVideo.Description = enrichedVideo.Description;
+            // Merge enriched metadata without wiping the data that came from the card/history.
+            // Some enrichment paths can legitimately return only duration/thumbnail, so direct
+            // assignment here can blank the title/channel/description on the video page.
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.Title))
+            {
+                CurrentVideo.Title = enrichedVideo.Title;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.Channel))
+            {
+                CurrentVideo.Channel = enrichedVideo.Channel;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.ChannelId))
+            {
+                CurrentVideo.ChannelId = enrichedVideo.ChannelId;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.Views))
+            {
+                CurrentVideo.Views = enrichedVideo.Views;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.Likes))
+            {
+                CurrentVideo.Likes = enrichedVideo.Likes;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.Duration))
+            {
+                CurrentVideo.Duration = enrichedVideo.Duration;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.PublishedAt))
+            {
+                CurrentVideo.PublishedAt = enrichedVideo.PublishedAt;
+            }
+
+            if (enrichedVideo.PublishedAtSort != null)
+            {
+                CurrentVideo.PublishedAtSort = enrichedVideo.PublishedAtSort;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.Thumbnail))
+            {
+                CurrentVideo.Thumbnail = enrichedVideo.Thumbnail;
+            }
+
+            if (!string.IsNullOrWhiteSpace(enrichedVideo.Description))
+            {
+                CurrentVideo.Description = enrichedVideo.Description;
+            }
+
+            // Live/premiere flags are meaningful even when text fields are empty.
             CurrentVideo.IsLive = enrichedVideo.IsLive;
             CurrentVideo.IsPremiere = enrichedVideo.IsPremiere;
             CurrentVideo.LiveChatId = enrichedVideo.LiveChatId;
-            CurrentVideo.IsEmbeddable = enrichedVideo.IsEmbeddable;
 
-            DataContext = null;
-            DataContext = CurrentVideo;
-            ApplyLiveChatLayout();
-            UpdateChannelButtonVisibility();
+            if (enrichedVideo.IsEmbeddable)
+            {
+                CurrentVideo.IsEmbeddable = true;
+            }
+
+            // Preserve local continue-watching progress after metadata enrichment.
+            WatchHistoryService.ApplySavedProgress(CurrentVideo);
+
+            EnsureCurrentVideoDefaults();
+            RefreshCurrentVideoBindings();
             _ = UpdateSubscriptionButtonAsync();
-            Bindings.Update();
+
+            WatchHistoryService.UpdateMetadata(CurrentVideo);
 
             if (CurrentVideo.IsLive)
             {
