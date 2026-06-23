@@ -35,6 +35,9 @@
     let idleTimer = 0;
     let progressTimer = 0;
     let resumeApplied = false;
+    let autoPlayAttempts = 0;
+    let hasStartedPlaying = false;
+    let userPaused = false;
 
     function resetCursorIdle() {
       document.body.classList.remove("idle");
@@ -128,6 +131,63 @@
       }
     }
 
+
+
+    function tryStartPlayback() {
+      const player = getPlayer();
+
+      if (!player || typeof player.playVideo !== "function") {
+        return;
+      }
+
+      try {
+        player.playVideo();
+        reportProgress("autoplay");
+      } catch (_) {
+      }
+    }
+
+    function startPlaybackWithRetries() {
+      clearTimeout(window.__smoothTubeAutoplayRetryTimer);
+      autoPlayAttempts = 0;
+
+      const retry = () => {
+        const player = getPlayer();
+
+        if (!player) {
+          if (autoPlayAttempts++ < 20) {
+            window.__smoothTubeAutoplayRetryTimer = setTimeout(retry, 300);
+          }
+
+          return;
+        }
+
+        let state = -999;
+
+        try {
+          if (typeof player.getPlayerState === "function") {
+            state = player.getPlayerState();
+          }
+        } catch (_) {
+        }
+
+        if (userPaused || hasStartedPlaying) {
+          return;
+        }
+
+        if (state !== YT.PlayerState.PLAYING) {
+          applyResume();
+          tryStartPlayback();
+
+          if (autoPlayAttempts++ < 12) {
+            window.__smoothTubeAutoplayRetryTimer = setTimeout(retry, 400);
+          }
+        }
+      };
+
+      retry();
+    }
+
     function startProgressReporting() {
       clearInterval(progressTimer);
       progressTimer = setInterval(() => {
@@ -175,6 +235,7 @@
         playerVars: {
           autoplay: 1,
           playsinline: 1,
+          enablejsapi: 1,
           rel: 0,
           modestbranding: 1,
           origin: window.location.origin,
@@ -187,15 +248,28 @@
             applyResume();
             reportProgress("ready");
             startProgressReporting();
+            startPlaybackWithRetries();
           },
           onStateChange: event => {
+            if (event.data === YT.PlayerState.CUED && !hasStartedPlaying && !userPaused) {
+              startPlaybackWithRetries();
+            }
+
             if (event.data === YT.PlayerState.PLAYING) {
+              hasStartedPlaying = true;
+              userPaused = false;
+              clearTimeout(window.__smoothTubeAutoplayRetryTimer);
               applyResume();
               reportProgress("playing");
               startProgressReporting();
             }
 
             if (event.data === YT.PlayerState.PAUSED) {
+              if (hasStartedPlaying) {
+                userPaused = true;
+                clearTimeout(window.__smoothTubeAutoplayRetryTimer);
+              }
+
               reportProgress("paused");
             }
 

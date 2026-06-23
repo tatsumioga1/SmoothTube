@@ -10,8 +10,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI;
@@ -21,7 +23,18 @@ namespace SmoothTube
 {
     public sealed partial class VideoPage : Page
     {
+        private static readonly HttpClient MetadataHttpClient = new()
+        {
+            Timeout = TimeSpan.FromSeconds(10)
+        };
+
         public VideoItem CurrentVideo { get; set; } = new();
+
+        public string CurrentChannelThumbnail { get; set; } = "";
+
+        public string CurrentChannelSubscriberText { get; set; } = "";
+
+        public string CurrentVideoMetaText { get; set; } = "";
 
         public List<VideoItem> RecommendedVideos { get; set; } = [];
 
@@ -64,6 +77,8 @@ namespace SmoothTube
             {
                 CurrentVideo = data.CurrentVideo;
                 EnsureCurrentVideoDefaults();
+                ResetChannelPresentation();
+                UpdateVideoMetaText();
 
                 AllVideos = data.AllVideos;
 
@@ -81,6 +96,7 @@ namespace SmoothTube
                 WatchHistoryService.RecordStarted(CurrentVideo);
                 RefreshCurrentVideoBindings();
                 _ = EnrichCurrentVideoAsync();
+                _ = LoadChannelPresentationAsync();
                 _ = UpdatePlayerSourceAsync();
                 _ = LoadSocialDataAsync();
             }
@@ -89,6 +105,8 @@ namespace SmoothTube
                 AllVideos = VideoCatalog.GetAll();
                 CurrentVideo = AllVideos.FirstOrDefault() ?? new VideoItem();
                 EnsureCurrentVideoDefaults();
+                ResetChannelPresentation();
+                UpdateVideoMetaText();
                 RecommendedVideos = AllVideos.Skip(1).ToList();
                 DataContext = CurrentVideo;
                 ApplyLiveChatLayout();
@@ -99,6 +117,7 @@ namespace SmoothTube
                 WatchHistoryService.RecordStarted(CurrentVideo);
                 RefreshCurrentVideoBindings();
                 _ = EnrichCurrentVideoAsync();
+                _ = LoadChannelPresentationAsync();
                 _ = UpdatePlayerSourceAsync();
                 _ = LoadSocialDataAsync();
             }
@@ -132,6 +151,7 @@ namespace SmoothTube
 
         private void RefreshCurrentVideoBindings()
         {
+            UpdateVideoMetaText();
             DataContext = null;
             DataContext = CurrentVideo;
             ApplyLiveChatLayout();
@@ -214,6 +234,15 @@ namespace SmoothTube
             if (DescriptionPanel != null)
             {
                 DescriptionPanel.Visibility =
+                    string.IsNullOrWhiteSpace(CurrentVideo.Description) &&
+                    string.IsNullOrWhiteSpace(CurrentVideoMetaText)
+                        ? Visibility.Collapsed
+                        : Visibility.Visible;
+            }
+
+            if (DescriptionToggleButton != null)
+            {
+                DescriptionToggleButton.Visibility =
                     string.IsNullOrWhiteSpace(CurrentVideo.Description)
                         ? Visibility.Collapsed
                         : Visibility.Visible;
@@ -1140,6 +1169,433 @@ namespace SmoothTube
             }
         }
 
+        private void ChannelAvatarImage_Loaded(
+            object sender,
+            RoutedEventArgs e)
+        {
+            UpdateChannelAvatarImage();
+        }
+
+        private void ChannelAvatarImage_ImageFailed(
+            object sender,
+            ExceptionRoutedEventArgs e)
+        {
+            if (sender is Image image)
+            {
+                image.Source = null;
+            }
+        }
+
+        private void UpdateChannelAvatarImage()
+        {
+            if (ChannelAvatarImage == null)
+            {
+                return;
+            }
+
+            string thumbnail = CurrentChannelThumbnail;
+
+            if (thumbnail.StartsWith("//", StringComparison.Ordinal))
+            {
+                thumbnail = "https:" + thumbnail;
+            }
+
+            if (Uri.TryCreate(thumbnail, UriKind.Absolute, out Uri? uri) &&
+                (uri.Scheme == "https" ||
+                 uri.Scheme == "http" ||
+                 uri.Scheme == "ms-appx" ||
+                 uri.Scheme == "file"))
+            {
+                ChannelAvatarImage.Source = new BitmapImage(uri)
+                {
+                    DecodePixelWidth = 88
+                };
+            }
+            else
+            {
+                ChannelAvatarImage.Source = null;
+            }
+        }
+
+        private void ResetChannelPresentation()
+        {
+            CurrentChannelThumbnail = "";
+            CurrentChannelSubscriberText = "";
+            UpdateChannelAvatarImage();
+        }
+
+        private void UpdateVideoMetaText()
+        {
+            List<string> parts = [];
+
+            if (!string.IsNullOrWhiteSpace(CurrentVideo.Views))
+            {
+                parts.Add(CurrentVideo.Views);
+            }
+
+            if (!string.IsNullOrWhiteSpace(CurrentVideo.PublishedAt))
+            {
+                parts.Add(CurrentVideo.PublishedAt);
+            }
+
+            CurrentVideoMetaText = string.Join(" • ", parts);
+        }
+
+        private async Task LoadChannelPresentationAsync()
+        {
+            if (CurrentVideo == null ||
+                string.IsNullOrWhiteSpace(CurrentVideo.Id))
+            {
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(CurrentVideo.ChannelId) &&
+                !string.IsNullOrWhiteSpace(CurrentVideo.Channel))
+            {
+                await TryResolveCurrentChannelAsync();
+            }
+
+            if (!string.IsNullOrWhiteSpace(CurrentVideo.ChannelId))
+            {
+                bool loadedFromApi = await TryLoadChannelPresentationFromApiAsync(CurrentVideo.ChannelId);
+
+                if (!loadedFromApi)
+                {
+                    ChannelItem? channel = await ServiceLocator.YouTube.GetChannelAsync(CurrentVideo.ChannelId);
+
+                    if (channel != null)
+                    {
+                        if (!string.IsNullOrWhiteSpace(channel.Thumbnail))
+                        {
+                            CurrentChannelThumbnail = channel.Thumbnail;
+                        }
+
+                        if (!string.IsNullOrWhiteSpace(channel.Title) &&
+                            string.IsNullOrWhiteSpace(CurrentVideo.Channel))
+                        {
+                            CurrentVideo.Channel = channel.Title;
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(CurrentChannelThumbnail) ||
+                string.IsNullOrWhiteSpace(CurrentChannelSubscriberText) ||
+                string.IsNullOrWhiteSpace(CurrentVideo.Description))
+            {
+                await TryEnrichCurrentVideoFromWatchPageAsync();
+            }
+
+            RefreshCurrentVideoBindings();
+            UpdateChannelAvatarImage();
+        }
+
+        private static bool HasApiKey =>
+            AppSettings.HasYouTubeApiKey;
+
+        private static async Task<JsonDocument?> TryGetJsonDocumentAsync(string requestUri)
+        {
+            if (string.IsNullOrWhiteSpace(requestUri))
+            {
+                return null;
+            }
+
+            try
+            {
+                using HttpResponseMessage response =
+                    await MetadataHttpClient.GetAsync(requestUri);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                await using Stream stream =
+                    await response.Content.ReadAsStreamAsync();
+
+                return await JsonDocument.ParseAsync(stream);
+            }
+            catch (Exception ex) when (ex is HttpRequestException ||
+                ex is TaskCanceledException ||
+                ex is JsonException)
+            {
+                return null;
+            }
+        }
+
+        private async Task<bool> TryLoadChannelPresentationFromApiAsync(string channelId)
+        {
+            if (!HasApiKey || string.IsNullOrWhiteSpace(channelId))
+            {
+                return false;
+            }
+
+            string requestUri =
+                "https://www.googleapis.com/youtube/v3/channels" +
+                "?part=snippet,statistics" +
+                $"&id={Uri.EscapeDataString(channelId)}" +
+                $"&key={Uri.EscapeDataString(AppSettings.YouTubeApiKey)}";
+
+            using JsonDocument? document =
+                await TryGetJsonDocumentAsync(requestUri);
+
+            if (document == null)
+            {
+                return false;
+            }
+
+            if (!document.RootElement.TryGetProperty("items", out JsonElement items) ||
+                items.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            JsonElement channel =
+                items.EnumerateArray().FirstOrDefault();
+
+            if (channel.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (channel.TryGetProperty("snippet", out JsonElement snippet))
+            {
+                string title = GetJsonString(snippet, "title");
+
+                if (!string.IsNullOrWhiteSpace(title) &&
+                    string.IsNullOrWhiteSpace(CurrentVideo.Channel))
+                {
+                    CurrentVideo.Channel = title;
+                }
+
+                string thumbnail = GetBestThumbnailFromSnippet(snippet);
+
+                if (!string.IsNullOrWhiteSpace(thumbnail))
+                {
+                    CurrentChannelThumbnail = thumbnail;
+                }
+            }
+
+            if (channel.TryGetProperty("statistics", out JsonElement statistics))
+            {
+                bool hiddenSubscriberCount =
+                    statistics.TryGetProperty("hiddenSubscriberCount", out JsonElement hiddenElement) &&
+                    hiddenElement.ValueKind == JsonValueKind.True;
+
+                string subscriberCount = GetJsonString(statistics, "subscriberCount");
+
+                if (!hiddenSubscriberCount &&
+                    ulong.TryParse(
+                        subscriberCount,
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out ulong count))
+                {
+                    CurrentChannelSubscriberText = $"{FormatCompactCount(count)} subscribers";
+                }
+            }
+
+            return !string.IsNullOrWhiteSpace(CurrentChannelThumbnail) ||
+                !string.IsNullOrWhiteSpace(CurrentChannelSubscriberText);
+        }
+
+        private async Task TryEnrichCurrentVideoFromWatchPageAsync()
+        {
+            if (string.IsNullOrWhiteSpace(CurrentVideo.Id))
+            {
+                return;
+            }
+
+            try
+            {
+                using HttpResponseMessage response =
+                    await MetadataHttpClient.GetAsync(
+                        "https://www.youtube.com/watch" +
+                        $"?v={Uri.EscapeDataString(CurrentVideo.Id)}" +
+                        "&bpctr=9999999999&has_verified=1");
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return;
+                }
+
+                string body = await response.Content.ReadAsStringAsync();
+
+                if (string.IsNullOrWhiteSpace(CurrentVideo.Description))
+                {
+                    string description = MatchJsonString(
+                        body,
+                        @"""shortDescription"":""(?<value>(?:\\.|[^""\\])*)""");
+
+                    if (!string.IsNullOrWhiteSpace(description))
+                    {
+                        CurrentVideo.Description = description;
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(CurrentVideo.Channel))
+                {
+                    string ownerName = MatchJsonString(
+                        body,
+                        @"""ownerChannelName"":""(?<value>(?:\\.|[^""\\])*)""");
+
+                    if (!string.IsNullOrWhiteSpace(ownerName))
+                    {
+                        CurrentVideo.Channel = ownerName;
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(CurrentChannelSubscriberText))
+                {
+                    string subscriberText = MatchJsonString(
+                        body,
+                        @"""subscriberCountText"":\{""simpleText"":""(?<value>(?:\\.|[^""\\])*)""");
+
+                    if (!string.IsNullOrWhiteSpace(subscriberText))
+                    {
+                        CurrentChannelSubscriberText = subscriberText;
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(CurrentChannelThumbnail))
+                {
+                    string avatar = MatchBestYouTubeImageUrl(body, "yt3.ggpht.com");
+
+                    if (string.IsNullOrWhiteSpace(avatar))
+                    {
+                        avatar = MatchBestYouTubeImageUrl(body, "yt3.googleusercontent.com");
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(avatar))
+                    {
+                        CurrentChannelThumbnail = avatar;
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException ||
+                ex is TaskCanceledException ||
+                ex is RegexMatchTimeoutException)
+            {
+            }
+        }
+
+        private static string GetJsonString(JsonElement element, string propertyName)
+        {
+            return element.TryGetProperty(propertyName, out JsonElement property) &&
+                property.ValueKind == JsonValueKind.String
+                    ? property.GetString() ?? ""
+                    : "";
+        }
+
+        private static string GetBestThumbnailFromSnippet(JsonElement snippet)
+        {
+            if (!snippet.TryGetProperty("thumbnails", out JsonElement thumbnails) ||
+                thumbnails.ValueKind != JsonValueKind.Object)
+            {
+                return "";
+            }
+
+            foreach (string name in new[] { "high", "medium", "default" })
+            {
+                if (thumbnails.TryGetProperty(name, out JsonElement thumbnail) &&
+                    thumbnail.TryGetProperty("url", out JsonElement urlElement) &&
+                    urlElement.ValueKind == JsonValueKind.String)
+                {
+                    string url = urlElement.GetString() ?? "";
+
+                    if (!string.IsNullOrWhiteSpace(url))
+                    {
+                        return url;
+                    }
+                }
+            }
+
+            return "";
+        }
+
+        private static string MatchJsonString(string input, string pattern)
+        {
+            if (string.IsNullOrWhiteSpace(input) ||
+                string.IsNullOrWhiteSpace(pattern))
+            {
+                return "";
+            }
+
+            try
+            {
+                Match match = Regex.Match(
+                    input,
+                    pattern,
+                    RegexOptions.IgnoreCase,
+                    TimeSpan.FromMilliseconds(500));
+
+                if (!match.Success)
+                {
+                    return "";
+                }
+
+                string raw = match.Groups["value"].Value;
+
+                if (string.IsNullOrWhiteSpace(raw))
+                {
+                    return "";
+                }
+
+                return JsonSerializer.Deserialize<string>("\"" + raw + "\"") ?? "";
+            }
+            catch (Exception ex) when (ex is JsonException ||
+                ex is RegexMatchTimeoutException)
+            {
+                return "";
+            }
+        }
+
+        private static string MatchBestYouTubeImageUrl(string input, string host)
+        {
+            if (string.IsNullOrWhiteSpace(input) ||
+                string.IsNullOrWhiteSpace(host))
+            {
+                return "";
+            }
+
+            try
+            {
+                MatchCollection matches = Regex.Matches(
+                    input,
+                    @"https:\/\/" + Regex.Escape(host) + @"\/[^""\\]+",
+                    RegexOptions.IgnoreCase,
+                    TimeSpan.FromMilliseconds(700));
+
+                return matches
+                    .Select(match => match.Value.Replace("\\/", "/"))
+                    .Select(url => url.Replace("\\u0026", "&"))
+                    .Where(url => Uri.TryCreate(url, UriKind.Absolute, out _))
+                    .OrderByDescending(url => url.Contains("=s176", StringComparison.OrdinalIgnoreCase))
+                    .ThenByDescending(url => url.Contains("=s160", StringComparison.OrdinalIgnoreCase))
+                    .FirstOrDefault() ?? "";
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                return "";
+            }
+        }
+
+        private static string FormatCompactCount(ulong count)
+        {
+            return count switch
+            {
+                >= 1_000_000_000 => $"{TrimCount(count / 1_000_000_000d)}B",
+                >= 1_000_000 => $"{TrimCount(count / 1_000_000d)}M",
+                >= 1_000 => $"{TrimCount(count / 1_000d)}K",
+                _ => count.ToString("N0", CultureInfo.InvariantCulture)
+            };
+        }
+
+        private static string TrimCount(double value)
+        {
+            return value.ToString(value >= 10 ? "0.#" : "0.##", CultureInfo.InvariantCulture);
+        }
+
         private async void RefreshLiveChat_Click(
             object sender,
             RoutedEventArgs e)
@@ -1302,13 +1758,139 @@ namespace SmoothTube
             RoutedEventArgs e)
         {
             if (sender is not Image image ||
-                image.DataContext is not VideoItem video ||
-                !Uri.TryCreate(video.Thumbnail, UriKind.Absolute, out Uri? uri))
+                image.DataContext is not VideoItem video)
             {
                 return;
             }
 
-            image.Source = new BitmapImage(uri);
+            image.ImageFailed -= UpNextThumbnail_ImageFailed;
+            image.ImageFailed += UpNextThumbnail_ImageFailed;
+
+            List<string> candidates =
+                BuildUpNextThumbnailCandidates(video);
+
+            image.Tag = candidates;
+            SetUpNextThumbnailSource(image, candidates, 0);
+        }
+
+        private void UpNextThumbnail_ImageFailed(
+            object sender,
+            ExceptionRoutedEventArgs e)
+        {
+            if (sender is not Image image ||
+                image.Tag is not List<string> candidates)
+            {
+                return;
+            }
+
+            string current =
+                (image.Source as BitmapImage)?.UriSource?.ToString() ?? "";
+
+            int nextIndex =
+                Math.Max(0, candidates.FindIndex(item =>
+                    item.Equals(current, StringComparison.OrdinalIgnoreCase))) + 1;
+
+            SetUpNextThumbnailSource(image, candidates, nextIndex);
+        }
+
+        private static void SetUpNextThumbnailSource(
+            Image image,
+            List<string> candidates,
+            int startIndex)
+        {
+            for (int i = Math.Max(0, startIndex); i < candidates.Count; i++)
+            {
+                string thumbnail = candidates[i];
+
+                if (Uri.TryCreate(thumbnail, UriKind.Absolute, out Uri? uri) &&
+                    (uri.Scheme == "https" ||
+                     uri.Scheme == "http" ||
+                     uri.Scheme == "ms-appx" ||
+                     uri.Scheme == "file"))
+                {
+                    image.Source = new BitmapImage(uri)
+                    {
+                        DecodePixelWidth = 280
+                    };
+
+                    return;
+                }
+            }
+
+            image.Source = null;
+        }
+
+        private static List<string> BuildUpNextThumbnailCandidates(
+            VideoItem video)
+        {
+            List<string> urls = [];
+
+            string videoId = video.Id ?? "";
+            string original = video.Thumbnail ?? "";
+
+            if (original.StartsWith("//", StringComparison.Ordinal))
+            {
+                original = "https:" + original;
+            }
+
+            string extractedId =
+                ExtractYouTubeThumbnailVideoId(original);
+
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                videoId = extractedId;
+            }
+
+            if (!string.IsNullOrWhiteSpace(videoId))
+            {
+                // Prefer 16:9 thumbnails first. hqdefault/mqdefault often include
+                // baked-in black bars, which is what made the Up next thumbnails look pushed down.
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/hq720.jpg");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault.webp");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/hq720.webp");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/sddefault.jpg");
+            }
+
+            if (!string.IsNullOrWhiteSpace(original))
+            {
+                urls.Add(original);
+            }
+
+            if (!string.IsNullOrWhiteSpace(videoId))
+            {
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/hqdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/mqdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/default.jpg");
+            }
+
+            return urls
+                .Where(url => !string.IsNullOrWhiteSpace(url))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static string ExtractYouTubeThumbnailVideoId(
+            string thumbnail)
+        {
+            if (string.IsNullOrWhiteSpace(thumbnail) ||
+                !Uri.TryCreate(thumbnail, UriKind.Absolute, out Uri? uri))
+            {
+                return "";
+            }
+
+            string[] parts =
+                uri.AbsolutePath
+                    .Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+            int viIndex =
+                Array.FindIndex(parts, part =>
+                    part.Equals("vi", StringComparison.OrdinalIgnoreCase) ||
+                    part.Equals("vi_webp", StringComparison.OrdinalIgnoreCase));
+
+            return viIndex >= 0 && viIndex + 1 < parts.Length
+                ? parts[viIndex + 1]
+                : "";
         }
 
         private async Task EnrichCurrentVideoAsync()
@@ -1395,6 +1977,7 @@ namespace SmoothTube
             EnsureCurrentVideoDefaults();
             RefreshCurrentVideoBindings();
             _ = UpdateSubscriptionButtonAsync();
+            _ = LoadChannelPresentationAsync();
 
             WatchHistoryService.UpdateMetadata(CurrentVideo);
 

@@ -69,8 +69,7 @@
                             <Grid x:Name="MockPlayerGrid">
 
                                 <Image
-                                    x:Name="MockThumbnailImage"
-                                    Loaded="MockThumbnailImage_Loaded"
+                                    Source="{Binding Thumbnail}"
                                     Stretch="Uniform"
                                     Opacity="0.5"/>
 
@@ -186,17 +185,22 @@
 
                 <StackPanel
                     x:Name="VideoInfoPanel"
-                    Spacing="10">
+                    Spacing="14">
 
                     <TextBlock
                         Text="{Binding Title}"
-                        FontSize="36"
-                        FontWeight="Bold"/>
+                        FontSize="32"
+                        FontWeight="Bold"
+                        TextWrapping="WrapWholeWords"
+                        TextTrimming="CharacterEllipsis"
+                        MaxLines="2"/>
 
-                    <StackPanel
-                        Orientation="Horizontal"
-                        Spacing="12"
-                        VerticalAlignment="Center">
+                    <Grid ColumnSpacing="14">
+
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
 
                         <Button
                             x:Name="ChannelButton"
@@ -206,52 +210,86 @@
                             BorderThickness="0"
                             Click="ChannelButton_Click">
 
-                            <TextBlock
-                                Text="{Binding Channel}"
-                                FontSize="20"
-                                Opacity="0.85"/>
+                            <Grid ColumnSpacing="12">
+
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <Border
+                                    Width="44"
+                                    Height="44"
+                                    CornerRadius="22"
+                                    Background="#2A2A2A"
+                                    VerticalAlignment="Center">
+
+                                    <Image
+                                        x:Name="ChannelAvatarImage"
+                                        Loaded="ChannelAvatarImage_Loaded"
+                                        ImageFailed="ChannelAvatarImage_ImageFailed"
+                                        Stretch="UniformToFill"/>
+
+                                </Border>
+
+                                <StackPanel
+                                    Grid.Column="1"
+                                    VerticalAlignment="Center"
+                                    Spacing="2">
+
+                                    <TextBlock
+                                        Text="{Binding Channel}"
+                                        FontSize="16"
+                                        FontWeight="SemiBold"
+                                        TextTrimming="CharacterEllipsis"
+                                        MaxWidth="320"/>
+
+                                    <TextBlock
+                                        Text="{x:Bind CurrentChannelSubscriberText, Mode=OneWay}"
+                                        FontSize="13"
+                                        Opacity="0.65"
+                                        TextTrimming="CharacterEllipsis"
+                                        MaxWidth="320"/>
+
+                                </StackPanel>
+
+                            </Grid>
 
                         </Button>
 
-                        <TextBlock
-                            Text="{Binding PublishedAt}"
+                        <StackPanel
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            HorizontalAlignment="Right"
                             VerticalAlignment="Center"
-                            Opacity="0.7"/>
+                            Spacing="10">
 
-                        <Button
-                            x:Name="SubscribeButton"
-                            Content="Subscribe"
-                            Click="SubscribeButton_Click"/>
+                            <Button
+                                x:Name="SubscribeButton"
+                                Content="Subscribe"
+                                Click="SubscribeButton_Click"/>
 
-                        <Button
-                            x:Name="LikeButton"
-                            ToolTipService.ToolTip="Rate this video as liked on your signed-in YouTube account"
-                            Click="LikeButton_Click">
+                            <Button
+                                x:Name="LikeButton"
+                                ToolTipService.ToolTip="Rate this video as liked on your signed-in YouTube account"
+                                Click="LikeButton_Click">
 
-                            <SymbolIcon Symbol="Like"/>
+                                <SymbolIcon Symbol="Like"/>
 
-                        </Button>
+                            </Button>
 
-                        <Button
-                            x:Name="DislikeButton"
-                            ToolTipService.ToolTip="Rate this video as disliked on your signed-in YouTube account"
-                            Click="DislikeButton_Click">
+                            <Button
+                                x:Name="DislikeButton"
+                                ToolTipService.ToolTip="Rate this video as disliked on your signed-in YouTube account"
+                                Click="DislikeButton_Click">
 
-                            <SymbolIcon Symbol="Dislike"/>
+                                <SymbolIcon Symbol="Dislike"/>
 
-                        </Button>
+                            </Button>
 
-                    </StackPanel>
+                        </StackPanel>
 
-                    <StackPanel
-                        Orientation="Horizontal"
-                        Spacing="14">
-
-                        <TextBlock
-                            Text="{Binding Views}"
-                            Opacity="0.7"/>
-
-                    </StackPanel>
+                    </Grid>
 
                 </StackPanel>
 
@@ -264,6 +302,12 @@
                     Background="#1F1F1F">
 
                     <StackPanel Spacing="10">
+
+                        <TextBlock
+                            Text="{x:Bind CurrentVideoMetaText, Mode=OneWay}"
+                            FontWeight="SemiBold"
+                            Opacity="0.85"
+                            TextWrapping="Wrap"/>
 
                         <TextBlock
                             x:Name="DescriptionTextBlock"
@@ -431,7 +475,7 @@
                 Grid.Column="1"
                 Width="340"
                 HorizontalAlignment="Stretch"
-                Spacing="16">
+                Spacing="24">
 
                 <StackPanel
                     x:Name="LiveChatPanel"
@@ -541,8 +585,9 @@
                     <Grid
                         x:Name="UpNextHeaderGrid"
                         Width="340"
+                        Height="{Binding ActualHeight, ElementName=VideoActionsPanel}"
                         HorizontalAlignment="Stretch"
-                        Margin="0,4,0,0">
+                        Margin="0">
 
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
@@ -611,11 +656,17 @@
 
                                     <Border
                                         Grid.Column="0"
-                                        CornerRadius="8">
+                                        Width="140"
+                                        Height="80"
+                                        CornerRadius="8"
+                                        Background="#111111">
 
                                         <Image
                                             Loaded="VideoThumbnail_Loaded"
+                                            Width="140"
                                             Height="80"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch"
                                             Stretch="UniformToFill"
                                             DataContext="{Binding}"/>
 
