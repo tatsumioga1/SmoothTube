@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Navigation;
 using Microsoft.Web.WebView2.Core;
@@ -18,6 +19,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI;
 using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
 
 namespace SmoothTube
 {
@@ -52,6 +54,7 @@ namespace SmoothTube
         private bool isPlayerFullScreen;
         private bool playerEventsAttached;
         private bool descriptionExpanded;
+        private bool descriptionRichTextBuilt;
         private DispatcherTimer? progressTimer;
         private bool isStoppingPlayback;
         private DateTimeOffset? playbackStartedAt;
@@ -156,6 +159,7 @@ namespace SmoothTube
             DataContext = CurrentVideo;
             ApplyLiveChatLayout();
             UpdateChannelButtonVisibility();
+            UpdateDescriptionRichText();
             Bindings.Update();
         }
 
@@ -1228,14 +1232,14 @@ namespace SmoothTube
         {
             List<string> parts = [];
 
-            if (!string.IsNullOrWhiteSpace(CurrentVideo.Views))
-            {
-                parts.Add(CurrentVideo.Views);
-            }
-
             if (!string.IsNullOrWhiteSpace(CurrentVideo.PublishedAt))
             {
                 parts.Add(CurrentVideo.PublishedAt);
+            }
+
+            if (!string.IsNullOrWhiteSpace(CurrentVideo.Views))
+            {
+                parts.Add(CurrentVideo.Views);
             }
 
             CurrentVideoMetaText = string.Join(" • ", parts);
@@ -1281,7 +1285,8 @@ namespace SmoothTube
 
             if (string.IsNullOrWhiteSpace(CurrentChannelThumbnail) ||
                 string.IsNullOrWhiteSpace(CurrentChannelSubscriberText) ||
-                string.IsNullOrWhiteSpace(CurrentVideo.Description))
+                string.IsNullOrWhiteSpace(CurrentVideo.Description) ||
+                string.IsNullOrWhiteSpace(CurrentVideo.Views))
             {
                 await TryEnrichCurrentVideoFromWatchPageAsync();
             }
@@ -1421,15 +1426,21 @@ namespace SmoothTube
 
                 string body = await response.Content.ReadAsStringAsync();
 
-                if (string.IsNullOrWhiteSpace(CurrentVideo.Description))
-                {
-                    string description = MatchJsonString(
-                        body,
-                        @"""shortDescription"":""(?<value>(?:\\.|[^""\\])*)""");
+                string description = GetBestWatchPageDescription(body);
 
-                    if (!string.IsNullOrWhiteSpace(description))
+                if (!string.IsNullOrWhiteSpace(description) &&
+                    ShouldReplaceDescription(CurrentVideo.Description, description))
+                {
+                    CurrentVideo.Description = description;
+                }
+
+                if (string.IsNullOrWhiteSpace(CurrentVideo.Views))
+                {
+                    string viewText = GetBestWatchPageViewText(body);
+
+                    if (!string.IsNullOrWhiteSpace(viewText))
                     {
-                        CurrentVideo.Description = description;
+                        CurrentVideo.Views = viewText;
                     }
                 }
 
@@ -1511,6 +1522,102 @@ namespace SmoothTube
             }
 
             return "";
+        }
+
+        private static string GetBestWatchPageDescription(string body)
+        {
+            string description = MatchJsonString(
+                body,
+                @"""shortDescription"":""(?<value>(?:\\.|[^""\\])*)""");
+
+            if (!string.IsNullOrWhiteSpace(description))
+            {
+                return description.Trim();
+            }
+
+            description = MatchJsonString(
+                body,
+                @"""attributedDescriptionBodyText"":\{""content"":""(?<value>(?:\\.|[^""\\])*)""");
+
+            if (!string.IsNullOrWhiteSpace(description))
+            {
+                return description.Trim();
+            }
+
+            description = MatchJsonString(
+                body,
+                @"""description"":\{""simpleText"":""(?<value>(?:\\.|[^""\\])*)""");
+
+            return description.Trim();
+        }
+
+        private static bool ShouldReplaceDescription(string currentDescription, string candidateDescription)
+        {
+            if (string.IsNullOrWhiteSpace(candidateDescription))
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(currentDescription))
+            {
+                return true;
+            }
+
+            string current = currentDescription.Trim();
+            string candidate = candidateDescription.Trim();
+
+            if (candidate.Length <= current.Length)
+            {
+                return false;
+            }
+
+            return current.EndsWith("...", StringComparison.Ordinal) ||
+                candidate.Length > current.Length + 40;
+        }
+
+        private static string GetBestWatchPageViewText(string body)
+        {
+            string viewCount = MatchJsonString(
+                body,
+                @"""viewCount"":""(?<value>\d+)""");
+
+            if (ulong.TryParse(
+                viewCount,
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out ulong rawViewCount))
+            {
+                return rawViewCount.ToString("N0", CultureInfo.InvariantCulture) + " views";
+            }
+
+            string viewText = MatchJsonString(
+                body,
+                @"""viewCountText"":\{""simpleText"":""(?<value>(?:\\.|[^""\\])*)""");
+
+            if (!string.IsNullOrWhiteSpace(viewText))
+            {
+                return NormalizeViewText(viewText);
+            }
+
+            viewText = MatchJsonString(
+                body,
+                @"""viewCount"":\{""simpleText"":""(?<value>(?:\\.|[^""\\])*)""");
+
+            return NormalizeViewText(viewText);
+        }
+
+        private static string NormalizeViewText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "";
+            }
+
+            value = value.Trim();
+
+            return value.Contains("view", StringComparison.OrdinalIgnoreCase)
+                ? value
+                : value + " views";
         }
 
         private static string MatchJsonString(string input, string pattern)
@@ -1603,21 +1710,195 @@ namespace SmoothTube
             await LoadLiveChatAsync();
         }
 
+        private void UpdateDescriptionRichText()
+        {
+            string description = CurrentVideo?.Description ?? "";
+
+            descriptionRichTextBuilt = false;
+            descriptionExpanded = false;
+
+            if (DescriptionPreviewTextBlock != null)
+            {
+                DescriptionPreviewTextBlock.Text = description;
+                DescriptionPreviewTextBlock.Visibility = Visibility.Visible;
+            }
+
+            if (DescriptionRichTextBlock != null)
+            {
+                DescriptionRichTextBlock.Blocks.Clear();
+                DescriptionRichTextBlock.Visibility = Visibility.Collapsed;
+            }
+
+            if (DescriptionToggleButton != null)
+            {
+                DescriptionToggleButton.Content = "Show more";
+            }
+        }
+
+        private void BuildDescriptionRichTextIfNeeded()
+        {
+            if (descriptionRichTextBuilt ||
+                DescriptionRichTextBlock == null)
+            {
+                return;
+            }
+
+            DescriptionRichTextBlock.Blocks.Clear();
+
+            string description = CurrentVideo?.Description ?? "";
+
+            if (string.IsNullOrWhiteSpace(description))
+            {
+                return;
+            }
+
+            var paragraph = new Paragraph();
+            AddDescriptionInlines(paragraph, description);
+            DescriptionRichTextBlock.Blocks.Add(paragraph);
+            descriptionRichTextBuilt = true;
+        }
+
+        private static void AddDescriptionInlines(
+            Paragraph paragraph,
+            string text)
+        {
+            Regex urlRegex = new(
+                @"(?<url>(?:https?://|www\.)[^\s<>()]+)",
+                RegexOptions.IgnoreCase);
+
+            int currentIndex = 0;
+
+            foreach (Match match in urlRegex.Matches(text))
+            {
+                if (match.Index > currentIndex)
+                {
+                    AddTextRuns(
+                        paragraph,
+                        text[currentIndex..match.Index]);
+                }
+
+                string matchedUrl = match.Groups["url"].Value;
+                string trailingText = "";
+
+                while (matchedUrl.Length > 0 &&
+                    ".,;:!?)］】}".Contains(matchedUrl[^1]))
+                {
+                    trailingText = matchedUrl[^1] + trailingText;
+                    matchedUrl = matchedUrl[..^1];
+                }
+
+                string normalizedUrl = matchedUrl.StartsWith(
+                    "www.",
+                    StringComparison.OrdinalIgnoreCase)
+                        ? "https://" + matchedUrl
+                        : matchedUrl;
+
+                if (Uri.TryCreate(normalizedUrl, UriKind.Absolute, out Uri? uri) &&
+                    (uri.Scheme == Uri.UriSchemeHttp ||
+                     uri.Scheme == Uri.UriSchemeHttps))
+                {
+                    var hyperlink = new Hyperlink
+                    {
+                        NavigateUri = uri
+                    };
+
+                    hyperlink.Inlines.Add(
+                        new Run
+                        {
+                            Text = matchedUrl
+                        });
+
+                    paragraph.Inlines.Add(hyperlink);
+                }
+                else
+                {
+                    AddTextRuns(paragraph, match.Groups["url"].Value);
+                }
+
+                if (!string.IsNullOrEmpty(trailingText))
+                {
+                    AddTextRuns(paragraph, trailingText);
+                }
+
+                currentIndex = match.Index + match.Length;
+            }
+
+            if (currentIndex < text.Length)
+            {
+                AddTextRuns(paragraph, text[currentIndex..]);
+            }
+        }
+
+        private static void AddTextRuns(
+            Paragraph paragraph,
+            string text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                return;
+            }
+
+            string normalizedText = text.Replace("\r\n", "\n");
+            string[] lines = normalizedText.Split('\n');
+
+            for (int index = 0; index < lines.Length; index++)
+            {
+                if (lines[index].Length > 0)
+                {
+                    paragraph.Inlines.Add(
+                        new Run
+                        {
+                            Text = lines[index]
+                        });
+                }
+
+                if (index < lines.Length - 1)
+                {
+                    paragraph.Inlines.Add(new LineBreak());
+                }
+            }
+        }
+
         private void DescriptionToggleButton_Click(
             object sender,
             RoutedEventArgs e)
         {
             descriptionExpanded = !descriptionExpanded;
 
-            DescriptionTextBlock.MaxLines =
-                descriptionExpanded
-                    ? 0
-                    : 3;
+            if (descriptionExpanded)
+            {
+                BuildDescriptionRichTextIfNeeded();
 
-            DescriptionToggleButton.Content =
-                descriptionExpanded
-                    ? "Show less"
-                    : "Show more";
+                if (DescriptionPreviewTextBlock != null)
+                {
+                    DescriptionPreviewTextBlock.Visibility = Visibility.Collapsed;
+                }
+
+                if (DescriptionRichTextBlock != null)
+                {
+                    DescriptionRichTextBlock.Visibility = Visibility.Visible;
+                }
+
+                DescriptionToggleButton.Content = "Show less";
+                return;
+            }
+
+            if (DescriptionRichTextBlock != null)
+            {
+                DescriptionRichTextBlock.Visibility = Visibility.Collapsed;
+
+                // Clearing the rich text removes a large amount of inline layout work while scrolling.
+                DescriptionRichTextBlock.Blocks.Clear();
+            }
+
+            descriptionRichTextBuilt = false;
+
+            if (DescriptionPreviewTextBlock != null)
+            {
+                DescriptionPreviewTextBlock.Visibility = Visibility.Visible;
+            }
+
+            DescriptionToggleButton.Content = "Show more";
         }
 
         private async void LikeButton_Click(
@@ -1765,6 +2046,10 @@ namespace SmoothTube
 
             image.ImageFailed -= UpNextThumbnail_ImageFailed;
             image.ImageFailed += UpNextThumbnail_ImageFailed;
+            image.SizeChanged -= UpNextThumbnail_SizeChanged;
+            image.SizeChanged += UpNextThumbnail_SizeChanged;
+
+            ApplyUpNextThumbnailCrop(image);
 
             List<string> candidates =
                 BuildUpNextThumbnailCandidates(video);
@@ -1791,6 +2076,48 @@ namespace SmoothTube
                     item.Equals(current, StringComparison.OrdinalIgnoreCase))) + 1;
 
             SetUpNextThumbnailSource(image, candidates, nextIndex);
+        }
+
+        private void UpNextThumbnail_SizeChanged(
+            object sender,
+            SizeChangedEventArgs e)
+        {
+            if (sender is Image image)
+            {
+                ApplyUpNextThumbnailCrop(image);
+            }
+        }
+
+        private static void ApplyUpNextThumbnailCrop(Image image)
+        {
+            image.RenderTransformOrigin = new Point(0.5, 0.5);
+
+            const double baseThumbnailScale = 1.055;
+
+            if (image.RenderTransform is ScaleTransform scale)
+            {
+                scale.ScaleX = baseThumbnailScale;
+                scale.ScaleY = baseThumbnailScale;
+            }
+            else
+            {
+                image.RenderTransform = new ScaleTransform
+                {
+                    ScaleX = baseThumbnailScale,
+                    ScaleY = baseThumbnailScale
+                };
+            }
+
+            double width = image.ActualWidth > 0 ? image.ActualWidth : image.Width;
+            double height = image.ActualHeight > 0 ? image.ActualHeight : image.Height;
+
+            if (width > 0 && height > 0)
+            {
+                image.Clip = new RectangleGeometry
+                {
+                    Rect = new Rect(0, 0, width, height)
+                };
+            }
         }
 
         private static void SetUpNextThumbnailSource(
@@ -1843,13 +2170,15 @@ namespace SmoothTube
 
             if (!string.IsNullOrWhiteSpace(videoId))
             {
-                // Prefer 16:9 thumbnails first. hqdefault/mqdefault often include
-                // baked-in black bars, which is what made the Up next thumbnails look pushed down.
-                urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault.jpg");
+                // Prefer the clean 16:9 feed thumbnails first.
+                // maxresdefault can exist but still contain awkward/baked-in bars,
+                // so keep it after hq720/sddefault instead of using it first.
                 urls.Add($"https://i.ytimg.com/vi/{videoId}/hq720.jpg");
-                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault.webp");
                 urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/hq720.webp");
                 urls.Add($"https://i.ytimg.com/vi/{videoId}/sddefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/sddefault.webp");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault.webp");
             }
 
             if (!string.IsNullOrWhiteSpace(original))
@@ -1994,6 +2323,7 @@ namespace SmoothTube
                 video.Title == "Loading..." ||
                 string.IsNullOrWhiteSpace(video.Channel) ||
                 string.IsNullOrWhiteSpace(video.Description) ||
+                string.IsNullOrWhiteSpace(video.Views) ||
                 string.IsNullOrWhiteSpace(video.Duration) ||
                 video.IsLive && string.IsNullOrWhiteSpace(video.LiveChatId);
         }

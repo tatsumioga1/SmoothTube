@@ -309,11 +309,21 @@
                             Opacity="0.85"
                             TextWrapping="Wrap"/>
 
-                        <TextBlock
-                            x:Name="DescriptionTextBlock"
-                            Text="{Binding Description}"
-                            TextWrapping="Wrap"
-                            MaxLines="3"/>
+                        <Grid>
+
+                            <TextBlock
+                                x:Name="DescriptionPreviewTextBlock"
+                                TextWrapping="Wrap"
+                                MaxLines="3"
+                                IsTextSelectionEnabled="True"/>
+
+                            <RichTextBlock
+                                x:Name="DescriptionRichTextBlock"
+                                TextWrapping="Wrap"
+                                Visibility="Collapsed"
+                                IsTextSelectionEnabled="True"/>
+
+                        </Grid>
 
                         <Button
                             x:Name="DescriptionToggleButton"

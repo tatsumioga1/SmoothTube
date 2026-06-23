@@ -84,7 +84,9 @@
 
                             <Grid
                                 Grid.Column="0"
+                                Width="220"
                                 Height="124"
+                                HorizontalAlignment="Left"
                                 Visibility="{x:Bind ChannelThumbnailVisibility, Mode=OneTime}">
 
                                 <Ellipse
@@ -112,14 +114,20 @@
 
                             <Border
                                 Grid.Column="0"
+                                Width="220"
                                 Height="124"
                                 CornerRadius="8"
                                 Background="#151515"
-                                Visibility="{x:Bind VideoThumbnailVisibility, Mode=OneTime}">
+                                Visibility="{x:Bind VideoThumbnailVisibility, Mode=OneTime}"
+                                HorizontalAlignment="Left"
+                                VerticalAlignment="Center">
 
                                 <Image
+                                    Width="220"
+                                    Height="124"
                                     Stretch="UniformToFill"
-                                    Source="{x:Bind ThumbnailSource, Mode=OneTime}"/>
+                                    Source="{x:Bind ThumbnailSource, Mode=OneTime}"
+                                    ImageFailed="ThumbnailImage_ImageFailed"/>
 
                             </Border>
 

@@ -82,11 +82,7 @@ namespace SmoothTube
                 return;
             }
 
-            StatusText =
-                allVideos.Count == 0
-                    ? "No recent uploads loaded for this channel."
-                    : $"{UploadVideos.Count} uploads, {ShortVideos.Count} shorts, {LivestreamVideos.Count} livestreams";
-
+            StatusText = GetLoadedStatusText();
             Bindings.Update();
         }
 
@@ -108,12 +104,25 @@ namespace SmoothTube
             if (allVideos.Count <= previousCount)
             {
                 StatusText =
-                    "No more uploads were returned for this channel.";
+                    "No more uploads were returned for this channel.\n" +
+                    GetLoadedStatusText();
 
                 Bindings.Update();
             }
 
             isLoadingMore = false;
+        }
+
+        private string GetLoadedStatusText()
+        {
+            if (allVideos.Count == 0)
+            {
+                return "No recent content loaded for this channel.";
+            }
+
+            return
+                $"Currently loaded: {UploadVideos.Count} uploads • {ShortVideos.Count} shorts • {LivestreamVideos.Count} livestreams\n" +
+                "Load more to fetch additional content.";
         }
 
         private void ReplaceVideos(IEnumerable<VideoItem> videos)

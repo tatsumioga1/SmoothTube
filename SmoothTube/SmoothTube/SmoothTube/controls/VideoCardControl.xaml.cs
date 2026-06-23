@@ -8,11 +8,15 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using Windows.Foundation;
 
 namespace SmoothTube.Controls
 {
     public sealed partial class VideoCardControl : UserControl
     {
+        private const double BaseThumbnailScale = 1.045;
+        private const double HoverThumbnailScale = 1.095;
+
         private int thumbnailFallbackIndex;
         private List<string> thumbnailFallbackUrls = [];
 
@@ -27,6 +31,10 @@ namespace SmoothTube.Controls
             object sender,
             RoutedEventArgs e)
         {
+            ThumbnailImage.SizeChanged -= ThumbnailImage_SizeChanged;
+            ThumbnailImage.SizeChanged += ThumbnailImage_SizeChanged;
+
+            ApplyThumbnailCrop(BaseThumbnailScale);
             UpdateProgressVisibility();
             UpdateBadgeVisibility();
             UpdateThumbnailSource();
@@ -321,7 +329,8 @@ namespace SmoothTube.Controls
                 {
                     ThumbnailImage.Source = new BitmapImage(uri)
                     {
-                        DecodePixelWidth = Math.Max(1, (int)CardWidth)
+                        DecodePixelWidth = Math.Max(1, (int)CardWidth),
+                        DecodePixelHeight = Math.Max(1, (int)ThumbnailHeight)
                     };
 
                     return;
@@ -351,24 +360,25 @@ namespace SmoothTube.Controls
 
             if (!string.IsNullOrWhiteSpace(videoId))
             {
-                // Prefer true 16:9 YouTube thumbnails first.
-                // Some feed/API thumbnails are 4:3 variants such as default.jpg/mqdefault.jpg.
-                // Those load successfully, so ImageFailed never fires, but they create black bars.
+                // Prefer YouTube's wide 16:9 card thumbnails first.
+                // hq720 is usually the best feed/card candidate. maxresdefault can exist but still
+                // contain baked-in letterboxing for some videos, so it is no longer first.
                 if (looksLikeLiveThumbnail)
                 {
                     urls.Add($"https://i.ytimg.com/vi/{videoId}/hq720_live.jpg");
                     urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/hq720_live.webp");
+                    urls.Add($"https://i.ytimg.com/vi/{videoId}/sddefault_live.jpg");
+                    urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/sddefault_live.webp");
                     urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault_live.jpg");
                     urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault_live.webp");
                 }
 
-                urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault.jpg");
                 urls.Add($"https://i.ytimg.com/vi/{videoId}/hq720.jpg");
-                urls.Add($"https://i.ytimg.com/vi/{videoId}/sddefault.jpg");
-
-                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault.webp");
                 urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/hq720.webp");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/sddefault.jpg");
                 urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/sddefault.webp");
+                urls.Add($"https://i.ytimg.com/vi/{videoId}/maxresdefault.jpg");
+                urls.Add($"https://i.ytimg.com/vi_webp/{videoId}/maxresdefault.webp");
             }
 
             if (!string.IsNullOrWhiteSpace(originalThumbnail))
@@ -378,7 +388,7 @@ namespace SmoothTube.Controls
 
             if (!string.IsNullOrWhiteSpace(videoId))
             {
-                // Last-resort variants. These can be 4:3, so keep them after 16:9 options.
+                // Last-resort variants. These can be 4:3 or letterboxed, so keep them last.
                 urls.Add($"https://i.ytimg.com/vi/{videoId}/hqdefault.jpg");
                 urls.Add($"https://i.ytimg.com/vi/{videoId}/mqdefault.jpg");
                 urls.Add($"https://i.ytimg.com/vi/{videoId}/default.jpg");
@@ -412,8 +422,6 @@ namespace SmoothTube.Controls
                 return value;
             }
 
-            // Live thumbnails often come as hqdefault_live.jpg, which is more 4:3-ish.
-            // Prefer the 16:9 live version first, then fallbacks will handle missing variants.
             value = value
                 .Replace("/default_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
                 .Replace("/mqdefault_live.jpg", "/hq720_live.jpg", StringComparison.OrdinalIgnoreCase)
@@ -445,6 +453,52 @@ namespace SmoothTube.Controls
                 : "";
         }
 
+        private void ThumbnailImage_SizeChanged(
+            object sender,
+            SizeChangedEventArgs e)
+        {
+            ApplyThumbnailCrop(BaseThumbnailScale);
+        }
+
+        private void ApplyThumbnailCrop(double scaleValue)
+        {
+            if (ThumbnailImage == null)
+            {
+                return;
+            }
+
+            if (ThumbnailImage.RenderTransform is ScaleTransform scale)
+            {
+                scale.ScaleX = scaleValue;
+                scale.ScaleY = scaleValue;
+            }
+            else
+            {
+                ThumbnailImage.RenderTransformOrigin = new Point(0.5, 0.5);
+                ThumbnailImage.RenderTransform = new ScaleTransform
+                {
+                    ScaleX = scaleValue,
+                    ScaleY = scaleValue
+                };
+            }
+
+            double width = ThumbnailImage.ActualWidth > 0
+                ? ThumbnailImage.ActualWidth
+                : CardWidth;
+
+            double height = ThumbnailImage.ActualHeight > 0
+                ? ThumbnailImage.ActualHeight
+                : ThumbnailHeight;
+
+            if (width > 0 && height > 0)
+            {
+                ThumbnailImage.Clip = new RectangleGeometry
+                {
+                    Rect = new Rect(0, 0, width, height)
+                };
+            }
+        }
+
         private void ThumbnailImage_ImageFailed(
             object sender,
             ExceptionRoutedEventArgs e)
@@ -457,14 +511,14 @@ namespace SmoothTube.Controls
             object sender,
             PointerRoutedEventArgs e)
         {
-            AnimateThumbnail(1.065);
+            AnimateThumbnail(HoverThumbnailScale);
         }
 
         private void Card_PointerExited(
             object sender,
             PointerRoutedEventArgs e)
         {
-            AnimateThumbnail(1);
+            AnimateThumbnail(BaseThumbnailScale);
         }
 
         private void AnimateThumbnail(double targetScale)

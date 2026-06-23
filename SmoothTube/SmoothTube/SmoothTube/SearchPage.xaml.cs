@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media.Imaging;
 using SmoothTube.Models;
 using SmoothTube.Services;
 using System.Collections.ObjectModel;
@@ -147,6 +148,26 @@ namespace SmoothTube
                             .ToList()
                     });
             }
+        }
+
+        private void ThumbnailImage_ImageFailed(
+            object sender,
+            ExceptionRoutedEventArgs e)
+        {
+            if (sender is not Image image ||
+                image.DataContext is not SearchResultItem item ||
+                string.IsNullOrWhiteSpace(item.FallbackThumbnail) ||
+                item.FallbackThumbnail == item.Thumbnail ||
+                !System.Uri.TryCreate(item.FallbackThumbnail, System.UriKind.Absolute, out System.Uri? fallbackUri))
+            {
+                return;
+            }
+
+            image.Source = new BitmapImage(fallbackUri)
+            {
+                DecodePixelWidth = 240,
+                DecodePixelHeight = 136
+            };
         }
 
     }

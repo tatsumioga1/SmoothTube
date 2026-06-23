@@ -8,6 +8,7 @@ namespace SmoothTube.Models
     public class SearchResultItem
     {
         private ImageSource? thumbnailSource;
+        private ImageSource? fallbackThumbnailSource;
 
         public string Kind { get; set; } = "Video";
 
@@ -59,7 +60,22 @@ namespace SmoothTube.Models
             }
         }
 
-        public string Thumbnail =>
+        public string Thumbnail
+        {
+            get
+            {
+                string normalized = NormalizeThumbnail(
+                    Kind == "Channel"
+                        ? Channel?.Thumbnail ?? ""
+                        : Video?.Thumbnail ?? "");
+
+                return Kind == "Channel"
+                    ? normalized
+                    : PreferWideYouTubeThumbnail(normalized);
+            }
+        }
+
+        public string FallbackThumbnail =>
             NormalizeThumbnail(
                 Kind == "Channel"
                     ? Channel?.Thumbnail ?? ""
@@ -78,11 +94,32 @@ namespace SmoothTube.Models
                 thumbnailSource =
                     new BitmapImage(uri)
                     {
-                        DecodePixelWidth = Kind == "Channel" ? 128 : 240,
-                        DecodePixelHeight = Kind == "Channel" ? 128 : 136
+                        DecodePixelWidth = Kind == "Channel" ? 128 : 320,
+                        DecodePixelHeight = Kind == "Channel" ? 128 : 180
                     };
 
                 return thumbnailSource;
+            }
+        }
+
+        public ImageSource? FallbackThumbnailSource
+        {
+            get
+            {
+                if (fallbackThumbnailSource != null)
+                    return fallbackThumbnailSource;
+
+                if (!System.Uri.TryCreate(FallbackThumbnail, System.UriKind.Absolute, out System.Uri? uri))
+                    return null;
+
+                fallbackThumbnailSource =
+                    new BitmapImage(uri)
+                    {
+                        DecodePixelWidth = Kind == "Channel" ? 128 : 320,
+                        DecodePixelHeight = Kind == "Channel" ? 128 : 180
+                    };
+
+                return fallbackThumbnailSource;
             }
         }
 
@@ -101,6 +138,41 @@ namespace SmoothTube.Models
                     uri.Scheme == "file")
                     ? value
                     : "";
+        }
+
+        private static string PreferWideYouTubeThumbnail(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "";
+
+            if (!System.Uri.TryCreate(value, System.UriKind.Absolute, out System.Uri? uri))
+                return value;
+
+            string host = uri.Host.ToLowerInvariant();
+            if (!host.Contains("ytimg.com"))
+                return value;
+
+            string[] segments = uri.AbsolutePath
+                .Split('/', System.StringSplitOptions.RemoveEmptyEntries);
+
+            int videoIdIndex = -1;
+
+            for (int i = 0; i < segments.Length - 1; i++)
+            {
+                if (segments[i] == "vi" ||
+                    segments[i] == "vi_webp")
+                {
+                    videoIdIndex = i + 1;
+                    break;
+                }
+            }
+
+            if (videoIdIndex < 0 || videoIdIndex >= segments.Length)
+                return value;
+
+            string videoId = segments[videoIdIndex];
+
+            return $"https://i.ytimg.com/vi/{videoId}/hq720.jpg";
         }
     }
 }
