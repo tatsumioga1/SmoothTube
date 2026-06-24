@@ -15,6 +15,30 @@ namespace SmoothTube
 {
     public sealed partial class SubscriptionsPage : Page
     {
+        private const string SubscriptionsCacheFileName = "subscriptions-cache.json";
+
+        private sealed class SubscriptionsCache
+        {
+            public List<VideoItem> Uploads { get; set; } = [];
+            public List<VideoItem> Broadcasts { get; set; } = [];
+            public int UploadDays { get; set; }
+            public bool BroadcastsLoaded { get; set; }
+            public bool BroadcastQuotaExhausted { get; set; }
+            public bool UploadsIncludeShorts { get; set; }
+            public DateTimeOffset? UploadsRefreshedAt { get; set; }
+            public DateTimeOffset? BroadcastsRefreshedAt { get; set; }
+        }
+
+        private static readonly List<VideoItem> CachedUploads = [];
+        private static readonly List<VideoItem> CachedBroadcasts = [];
+        private static int cachedUploadDays;
+        private static bool cachedBroadcastsLoaded;
+        private static bool cachedBroadcastQuotaExhausted;
+        private static bool cachedUploadsIncludeShorts;
+        private static DateTimeOffset? cachedUploadsRefreshedAt;
+        private static DateTimeOffset? cachedBroadcastsRefreshedAt;
+        private static bool triedPersistentSubscriptionsCache;
+
         public ObservableCollection<VideoItem> Videos { get; } = [];
 
         public ObservableCollection<VideoItem> PremiereVideos { get; } = [];
@@ -32,13 +56,10 @@ namespace SmoothTube
 
         private bool isLoaded;
         private bool isLoading;
-        private bool livestreamsLoaded;
-        private bool livestreamsLoading;
-        private bool premieresLoaded;
-        private bool premieresLoading;
+        private bool broadcastsLoaded;
+        private bool broadcastsLoading;
         private int loadedUploadDays = 30;
         private CancellationTokenSource? loadCancellation;
-        private CancellationTokenSource? broadcastCancellation;
 
         private const int InitialUploadLimit = 24;
         private const int InitialUploadLookbackDays = 30;
@@ -64,10 +85,19 @@ namespace SmoothTube
             }
 
             isLoaded = true;
+
+            EnsurePersistentSubscriptionsCacheLoaded();
+
+            if (TryLoadFromPageCache())
+            {
+                ApplyVisibleFilters();
+                return;
+            }
+
             await LoadVideosAsync(false);
         }
 
-        private void Filters_Changed(
+        private async void Filters_Changed(
             object sender,
             RoutedEventArgs e)
         {
@@ -76,6 +106,14 @@ namespace SmoothTube
 
             if (ReferenceEquals(sender, IncludeShortsSwitch))
             {
+                if (IncludeShortsSwitch.IsOn &&
+                    CachedUploads.Count > 0 &&
+                    !cachedUploadsIncludeShorts)
+                {
+                    await LoadVideosAsync(true);
+                    return;
+                }
+
                 ApplyVisibleFilters();
             }
         }
@@ -84,6 +122,9 @@ namespace SmoothTube
             object sender,
             RoutedEventArgs e)
         {
+            if (isLoading)
+                return;
+
             await LoadVideosAsync(true);
         }
 
@@ -94,42 +135,62 @@ namespace SmoothTube
             if (isLoading)
                 return;
 
-            loadedUploadDays += 30;
+            loadedUploadDays++;
 
             await LoadUploadRangeAsync(
                 loadedUploadDays,
                 true,
                 10,
                 loadCancellation?.Token ?? CancellationToken.None);
+
+            SaveUploadsToPageCache();
+            ApplyVisibleFilters();
         }
 
         private async Task LoadVideosAsync(bool forceRefresh)
         {
             loadCancellation?.Cancel();
-            broadcastCancellation?.Cancel();
-
             loadCancellation = new CancellationTokenSource();
             CancellationToken cancellationToken = loadCancellation.Token;
 
+            EnsurePersistentSubscriptionsCacheLoaded();
+
             if (forceRefresh)
             {
+                // Refresh must be a clean time-based upload fetch.
+                // Do not merge stale upload cache, because a bad cache can keep
+                // older videos pinned above newer uploads.
+                // Keep cached livestream/premiere results so a normal uploads refresh
+                // does not force an expensive broadcast rescan.
                 ServiceLocator.YouTube.ClearSubscribedVideoCache();
+                ClearUploadsCache(clearPersistent: true);
+            }
+            else if (TryLoadFromPageCache())
+            {
+                ApplyVisibleFilters();
+                return;
             }
 
             loadedUploadDays = InitialUploadLookbackDays;
+
             loadedUploads.Clear();
             loadedBroadcasts.Clear();
-
-            livestreamsLoaded = false;
-            livestreamsLoading = false;
-            premieresLoaded = false;
-            premieresLoading = false;
 
             Videos.Clear();
             PremiereVideos.Clear();
             LivestreamVideos.Clear();
 
-            StatusText = "Loading recent subscription uploads...";
+            broadcastsLoaded = false;
+            broadcastsLoading = false;
+
+            StatusText = forceRefresh
+                ? IncludeShortsSwitch.IsOn
+                    ? "Refreshing latest subscription uploads..."
+                    : "Refreshing latest long-form subscription uploads..."
+                : IncludeShortsSwitch.IsOn
+                    ? "Loading recent subscription uploads..."
+                    : "Loading recent long-form subscription uploads...";
+
             Bindings.Update();
 
             try
@@ -140,17 +201,32 @@ namespace SmoothTube
                     InitialUploadLimit,
                     cancellationToken);
 
+                SaveUploadsToPageCache();
                 ApplyVisibleFilters();
 
-                StatusText =
-                    Videos.Count == 0
-                        ? "No recent uploads found."
-                        : FormatStatusText(false);
-
-                Bindings.Update();
+                // Livestreams/premieres are intentionally not auto-loaded here.
+                // They use the expensive broadcast scan and load only when those tabs are opened.
             }
             catch (TaskCanceledException)
             {
+            }
+            catch (Exception)
+            {
+                if (CachedUploads.Count > 0 || CachedBroadcasts.Count > 0)
+                {
+                    TryLoadFromPageCache();
+                    ApplyVisibleFilters();
+                    StatusText =
+                        "Refresh failed. Showing cached subscription results. Try again in a moment.\n" +
+                        FormatStatusText(false);
+                }
+                else
+                {
+                    StatusText =
+                        "Could not load subscription uploads. Try Refresh in a moment.";
+                }
+
+                Bindings.Update();
             }
         }
 
@@ -168,16 +244,20 @@ namespace SmoothTube
 
             StatusText = append
                 ? "Loading more recent uploads..."
-                : "Loading recent subscription uploads...";
+                : IncludeShortsSwitch.IsOn
+                    ? "Loading recent subscription uploads..."
+                    : "Loading recent long-form subscription uploads...";
 
             Bindings.Update();
 
             try
             {
+                int previousCount = loadedUploads.Count;
+
                 await foreach (List<VideoItem> batch in
                     ServiceLocator.YouTube.GetSubscribedVideoBatchesAsync(
                         days,
-                        true,
+                        IncludeShortsSwitch.IsOn,
                         cancellationToken))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -185,6 +265,7 @@ namespace SmoothTube
                     List<VideoItem> uploadVideos =
                         batch
                             .Where(video => !video.IsLive && !video.IsPremiere)
+                            .Where(video => IncludeShortsSwitch.IsOn || !IsLikelyShort(video))
                             .Where(video =>
                                 loadedUploads.All(existingVideo =>
                                     existingVideo.Id != video.Id))
@@ -205,9 +286,12 @@ namespace SmoothTube
                     break;
                 }
 
-                if (append && loadedUploads.Count == 0)
+                if (append && loadedUploads.Count <= previousCount)
                 {
-                    StatusText = "No more uploads found.";
+                    StatusText =
+                        "No more uploads were returned right now.\n" +
+                        FormatStatusText(false);
+
                     Bindings.Update();
                 }
             }
@@ -218,144 +302,83 @@ namespace SmoothTube
             }
         }
 
-        private async Task LoadBroadcastsAsync(
-            string eventType,
-            CancellationToken cancellationToken)
+        private async Task LoadBroadcastsAsync(CancellationToken cancellationToken)
         {
-            bool isLiveScan =
-                eventType.Equals("live", StringComparison.OrdinalIgnoreCase);
+            if (broadcastsLoading || broadcastsLoaded)
+                return;
 
-            if (isLiveScan)
+            if (cachedBroadcastQuotaExhausted)
             {
-                if (livestreamsLoading)
-                {
-                    StatusText = "Livestream scan is currently running.";
-                    Bindings.Update();
-                    return;
-                }
+                loadedBroadcasts.Clear();
+                loadedBroadcasts.AddRange(CachedBroadcasts);
+                ApplyVisibleFilters();
 
-                if (livestreamsLoaded)
-                {
-                    StatusText = "Livestream scan already completed.";
-                    Bindings.Update();
-                    return;
-                }
-
-                livestreamsLoading = true;
-            }
-            else
-            {
-                if (premieresLoading)
-                {
-                    StatusText = "Premiere scan is currently running.";
-                    Bindings.Update();
-                    return;
-                }
-
-                if (premieresLoaded)
-                {
-                    StatusText = "Premiere scan already completed.";
-                    Bindings.Update();
-                    return;
-                }
-
-                premieresLoading = true;
+                StatusText = FormatBroadcastQuotaStatus();
+                Bindings.Update();
+                return;
             }
 
-            StatusText =
-                isLiveScan
-                    ? "Checking livestreams from subscribed channels..."
-                    : "Checking upcoming premieres from subscribed channels...";
+            if (CachedBroadcasts.Count > 0 || cachedBroadcastsLoaded)
+            {
+                loadedBroadcasts.Clear();
+                loadedBroadcasts.AddRange(CachedBroadcasts);
+                broadcastsLoaded = cachedBroadcastsLoaded;
+                ApplyVisibleFilters();
+                return;
+            }
 
+            broadcastsLoading = true;
+
+            StatusText = "Checking live and upcoming subscriptions...";
             Bindings.Update();
-
-            int batchCount = 0;
-            int rawItemCount = 0;
 
             try
             {
                 await foreach (List<VideoItem> batch in
                     ServiceLocator.YouTube.GetSubscribedBroadcastBatchesAsync(
-                        eventType,
-                        cancellationToken))
+                        cancellationToken: cancellationToken))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    batchCount++;
-                    rawItemCount += batch.Count;
-
                     MergeVideos(loadedBroadcasts, batch);
+                    SaveBroadcastsToPageCache(false);
+
                     ApplyVisibleFilters(true);
-
-                    StatusText =
-                        isLiveScan
-                            ? $"Checking livestreams... batches: {batchCount}, raw found: {rawItemCount}, visible: {LivestreamVideos.Count}"
-                            : $"Checking premieres... batches: {batchCount}, raw found: {rawItemCount}, visible: {PremiereVideos.Count}";
-
-                    Bindings.Update();
                 }
 
-                bool quotaExhausted =
-                    ServiceLocator.YouTube.IsSearchQuotaExhausted;
-
-                if (quotaExhausted)
+                if (ServiceLocator.YouTube.IsSearchQuotaExhausted)
                 {
-                    StatusText =
-                        isLiveScan
-                            ? "Livestream scan stopped because the YouTube Search API quota is exhausted."
-                            : "Premiere scan stopped because the YouTube Search API quota is exhausted.";
+                    cachedBroadcastQuotaExhausted = true;
+                    broadcastsLoaded = false;
+                    SaveBroadcastsToPageCache(false);
+                    ApplyVisibleFilters();
 
+                    StatusText = FormatBroadcastQuotaStatus();
                     Bindings.Update();
                     return;
                 }
 
-                if (isLiveScan)
-                {
-                    livestreamsLoaded = true;
-                }
-                else
-                {
-                    premieresLoaded = true;
-                }
-
+                broadcastsLoaded = true;
+                cachedBroadcastQuotaExhausted = false;
+                SaveBroadcastsToPageCache(true);
                 ApplyVisibleFilters();
-
-                StatusText =
-                    isLiveScan
-                        ? $"Livestream scan complete. Found {LivestreamVideos.Count} livestreams."
-                        : $"Premiere scan complete. Found {PremiereVideos.Count} premieres.";
-
-                Bindings.Update();
             }
             catch (TaskCanceledException)
             {
-                StatusText =
-                    isLiveScan
-                        ? "Livestream scan cancelled."
-                        : "Premiere scan cancelled.";
-
-                Bindings.Update();
+                throw;
             }
             catch (Exception ex) when (ex is InvalidOperationException ||
                 ex is System.Runtime.InteropServices.COMException)
             {
                 StatusText =
-                    isLiveScan
-                        ? "Livestream check failed. Try Refresh in a moment."
-                        : "Premiere check failed. Try Refresh in a moment.";
+                    "Live and premiere checks failed. Try Refresh in a moment.\n" +
+                    FormatStatusText(false);
 
                 Bindings.Update();
             }
             finally
             {
-                if (isLiveScan)
-                {
-                    livestreamsLoading = false;
-                }
-                else
-                {
-                    premieresLoading = false;
-                }
+                broadcastsLoading = false;
             }
         }
 
@@ -366,17 +389,8 @@ namespace SmoothTube
             if (!isLoaded || SubscriptionsPivot.SelectedIndex == 0)
                 return;
 
-            broadcastCancellation?.Cancel();
-            broadcastCancellation = new CancellationTokenSource();
-
-            string eventType =
-                SubscriptionsPivot.SelectedIndex == 1
-                    ? "upcoming"
-                    : "live";
-
             await LoadBroadcastsAsync(
-                eventType,
-                broadcastCancellation.Token);
+                loadCancellation?.Token ?? CancellationToken.None);
         }
 
         private void VideoCard_Tapped(
@@ -427,10 +441,134 @@ namespace SmoothTube
                 Videos.Count == 0 && PremiereVideos.Count == 0 && LivestreamVideos.Count == 0
                     ? stillLoading
                         ? "Loading subscriptions..."
-                        : "No recent videos loaded for these filters."
+                        : "No recent videos loaded for these filters.\n" + FormatStatusText(false)
                     : FormatStatusText(stillLoading);
 
             Bindings.Update();
+        }
+
+        private bool TryLoadFromPageCache()
+        {
+            if (CachedUploads.Count == 0 && CachedBroadcasts.Count == 0)
+                return false;
+
+            if (IncludeShortsSwitch.IsOn && CachedUploads.Count > 0 && !cachedUploadsIncludeShorts)
+                return false;
+
+            loadedUploads.Clear();
+            loadedUploads.AddRange(CachedUploads);
+
+            loadedBroadcasts.Clear();
+            loadedBroadcasts.AddRange(CachedBroadcasts);
+
+            loadedUploadDays = Math.Max(InitialUploadLookbackDays, cachedUploadDays);
+            broadcastsLoaded = cachedBroadcastsLoaded;
+
+            return true;
+        }
+
+        private static void EnsurePersistentSubscriptionsCacheLoaded()
+        {
+            if (triedPersistentSubscriptionsCache)
+                return;
+
+            triedPersistentSubscriptionsCache = true;
+
+            SubscriptionsCache? cache =
+                PersistentCacheService.Load<SubscriptionsCache>(
+                    SubscriptionsCacheFileName);
+
+            if (cache == null)
+                return;
+
+            CachedUploads.Clear();
+            CachedUploads.AddRange(cache.Uploads ?? []);
+
+            CachedBroadcasts.Clear();
+            CachedBroadcasts.AddRange(cache.Broadcasts ?? []);
+
+            cachedUploadDays = cache.UploadDays;
+            cachedBroadcastsLoaded = cache.BroadcastsLoaded;
+            cachedBroadcastQuotaExhausted = cache.BroadcastQuotaExhausted;
+            cachedUploadsIncludeShorts = cache.UploadsIncludeShorts;
+            cachedUploadsRefreshedAt = cache.UploadsRefreshedAt;
+            cachedBroadcastsRefreshedAt = cache.BroadcastsRefreshedAt;
+        }
+
+        private static void SavePersistentSubscriptionsCache()
+        {
+            if (CachedUploads.Count == 0 && CachedBroadcasts.Count == 0)
+                return;
+
+            PersistentCacheService.Save(
+                SubscriptionsCacheFileName,
+                new SubscriptionsCache
+                {
+                    Uploads = CachedUploads.ToList(),
+                    Broadcasts = CachedBroadcasts.ToList(),
+                    UploadDays = cachedUploadDays,
+                    BroadcastsLoaded = cachedBroadcastsLoaded,
+                    BroadcastQuotaExhausted = cachedBroadcastQuotaExhausted,
+                    UploadsIncludeShorts = cachedUploadsIncludeShorts,
+                    UploadsRefreshedAt = cachedUploadsRefreshedAt,
+                    BroadcastsRefreshedAt = cachedBroadcastsRefreshedAt
+                });
+        }
+
+        private void SaveUploadsToPageCache()
+        {
+            CachedUploads.Clear();
+            CachedUploads.AddRange(loadedUploads);
+            cachedUploadDays = loadedUploadDays;
+            cachedUploadsIncludeShorts = IncludeShortsSwitch.IsOn;
+            cachedUploadsRefreshedAt = DateTimeOffset.Now;
+            SavePersistentSubscriptionsCache();
+        }
+
+        private void SaveBroadcastsToPageCache(bool completed)
+        {
+            CachedBroadcasts.Clear();
+            CachedBroadcasts.AddRange(loadedBroadcasts);
+            cachedBroadcastsLoaded = completed;
+            cachedBroadcastsRefreshedAt = DateTimeOffset.Now;
+            SavePersistentSubscriptionsCache();
+        }
+
+        private static void ClearUploadsCache(bool clearPersistent = false)
+        {
+            CachedUploads.Clear();
+            cachedUploadDays = 0;
+            cachedUploadsIncludeShorts = false;
+            cachedUploadsRefreshedAt = null;
+
+            if (clearPersistent)
+            {
+                if (CachedBroadcasts.Count > 0)
+                {
+                    SavePersistentSubscriptionsCache();
+                }
+                else
+                {
+                    PersistentCacheService.Clear(SubscriptionsCacheFileName);
+                }
+            }
+        }
+
+        private static void ClearPageCache(bool clearPersistent = false)
+        {
+            CachedUploads.Clear();
+            CachedBroadcasts.Clear();
+            cachedUploadDays = 0;
+            cachedBroadcastsLoaded = false;
+            cachedBroadcastQuotaExhausted = false;
+            cachedUploadsIncludeShorts = false;
+            cachedUploadsRefreshedAt = null;
+            cachedBroadcastsRefreshedAt = null;
+
+            if (clearPersistent)
+            {
+                PersistentCacheService.Clear(SubscriptionsCacheFileName);
+            }
         }
 
         private static bool IsLikelyShort(VideoItem video)
@@ -462,25 +600,47 @@ namespace SmoothTube
                 int.TryParse(parts[0], out int minutes) &&
                 int.TryParse(parts[1], out int seconds))
             {
-                int totalSeconds =
-                    minutes * 60 + seconds;
+                int totalSeconds = minutes * 60 + seconds;
 
-                return titleLooksShort ||
-                    totalSeconds <= 180;
+                return titleLooksShort || totalSeconds <= 180;
             }
 
             return titleLooksShort;
         }
 
-        private string FormatStatusText(bool isLoading)
+        private string FormatBroadcastQuotaStatus()
         {
-            string suffix =
-                isLoading
-                    ? "..."
-                    : "";
+            string cacheText =
+                CachedBroadcasts.Count > 0
+                    ? " Showing cached live/premiere results if available."
+                    : " No cached live/premiere results are available yet.";
 
             return
-                $"{Videos.Count} videos, {PremiereVideos.Count} premieres, {LivestreamVideos.Count} livestreams{suffix}";
+                "Live and premiere results may be partial because the YouTube Search API quota has been reached." +
+                cacheText +
+                " Try again after the quota resets.\n" +
+                FormatStatusText(false);
+        }
+
+        private string FormatStatusText(bool isLoading)
+        {
+            string loadingSuffix = isLoading ? "..." : "";
+
+            string text =
+                $"Currently loaded: {Videos.Count} recent uploads • {PremiereVideos.Count} premieres • {LivestreamVideos.Count} livestreams{loadingSuffix}\n" +
+                "Load more to fetch additional content.";
+
+            if (!IncludeShortsSwitch.IsOn)
+            {
+                text += " Shorts are hidden. Turn on Shorts to include them.";
+            }
+
+            if (cachedUploadsRefreshedAt.HasValue)
+            {
+                text += $" Last refreshed {cachedUploadsRefreshedAt.Value.LocalDateTime:g}.";
+            }
+
+            return text;
         }
 
         private static void MergeVideos(

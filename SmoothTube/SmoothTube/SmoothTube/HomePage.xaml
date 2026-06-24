@@ -71,10 +71,26 @@
 
             </ItemsControl>
 
-            <TextBlock
-                Text="{x:Bind PrimarySectionTitle}"
-                FontSize="28"
-                FontWeight="SemiBold"/>
+            <Grid ColumnSpacing="16">
+
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock
+                    Text="{x:Bind PrimarySectionTitle}"
+                    FontSize="28"
+                    FontWeight="SemiBold"/>
+
+                <Button
+                    Grid.Column="1"
+                    Content="Refresh"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Center"
+                    Click="RefreshRecommendedButton_Click"/>
+
+            </Grid>
 
             <ItemsControl
                 ItemsSource="{x:Bind SkeletonItems}"

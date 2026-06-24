@@ -14,6 +14,22 @@ namespace SmoothTube
 {
     public sealed partial class ChannelPage : Page
     {
+        private const string ChannelCacheFileName = "channel-page-cache.json";
+
+        private sealed class ChannelPageCacheEntry
+        {
+            public ChannelItem Channel { get; set; } = new();
+            public List<VideoItem> Videos { get; set; } = [];
+            public int RequestedUploadCount { get; set; }
+            public bool? IsSubscribed { get; set; }
+            public DateTimeOffset LastLoadedAt { get; set; } = DateTimeOffset.Now;
+        }
+
+        private static readonly Dictionary<string, ChannelPageCacheEntry> ChannelCache =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        private static bool triedPersistentChannelCache;
+
         public ChannelItem Channel { get; set; } = new();
 
         public ObservableCollection<VideoItem> UploadVideos { get; } = [];
@@ -40,7 +56,7 @@ namespace SmoothTube
                 requestedUploadCount = 24;
                 Bindings.Update();
                 UpdateBannerVisibility();
-                _ = LoadChannelAsync();
+                _ = LoadChannelAsync(false);
             }
         }
 
@@ -49,8 +65,14 @@ namespace SmoothTube
             InitializeComponent();
         }
 
-        private async System.Threading.Tasks.Task LoadChannelAsync()
+        private async System.Threading.Tasks.Task LoadChannelAsync(bool forceRefresh)
         {
+            if (!forceRefresh && TryLoadFromCache())
+            {
+                Bindings.Update();
+                return;
+            }
+
             StatusText = "Loading channel...";
             Bindings.Update();
 
@@ -66,7 +88,8 @@ namespace SmoothTube
                     UpdateBannerVisibility();
                 }
 
-                await UpdateSubscriptionButtonAsync();
+                bool isSubscribed =
+                    await UpdateSubscriptionButtonAsync();
 
                 List<VideoItem> videos =
                     await ServiceLocator.YouTube.GetChannelVideosAsync(
@@ -74,15 +97,16 @@ namespace SmoothTube
                         requestedUploadCount);
 
                 ReplaceVideos(videos);
+                SaveToCache(isSubscribed);
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
                 StatusText = $"Could not load this channel: {ex.Message}";
                 Bindings.Update();
                 return;
             }
 
-            StatusText = GetLoadedStatusText();
+            StatusText = FormatLoadedStatusText();
             Bindings.Update();
         }
 
@@ -99,13 +123,13 @@ namespace SmoothTube
             Bindings.Update();
 
             int previousCount = allVideos.Count;
-            await LoadChannelAsync();
+            await LoadChannelAsync(false);
 
             if (allVideos.Count <= previousCount)
             {
                 StatusText =
                     "No more uploads were returned for this channel.\n" +
-                    GetLoadedStatusText();
+                    FormatLoadedStatusText();
 
                 Bindings.Update();
             }
@@ -113,16 +137,90 @@ namespace SmoothTube
             isLoadingMore = false;
         }
 
-        private string GetLoadedStatusText()
+        private static void EnsurePersistentChannelCacheLoaded()
         {
-            if (allVideos.Count == 0)
+            if (triedPersistentChannelCache)
+                return;
+
+            triedPersistentChannelCache = true;
+
+            Dictionary<string, ChannelPageCacheEntry>? cache =
+                PersistentCacheService.Load<Dictionary<string, ChannelPageCacheEntry>>(
+                    ChannelCacheFileName);
+
+            if (cache == null || cache.Count == 0)
+                return;
+
+            ChannelCache.Clear();
+
+            foreach (KeyValuePair<string, ChannelPageCacheEntry> item in cache)
             {
-                return "No recent content loaded for this channel.";
+                if (!string.IsNullOrWhiteSpace(item.Key) &&
+                    item.Value?.Videos != null)
+                {
+                    ChannelCache[item.Key] = item.Value;
+                }
+            }
+        }
+
+        private bool TryLoadFromCache()
+        {
+            EnsurePersistentChannelCacheLoaded();
+            if (string.IsNullOrWhiteSpace(Channel.Id) ||
+                !ChannelCache.TryGetValue(Channel.Id, out ChannelPageCacheEntry? cache) ||
+                cache.Videos.Count == 0 ||
+                cache.RequestedUploadCount < requestedUploadCount)
+            {
+                return false;
             }
 
-            return
+            Channel = cache.Channel;
+            ReplaceVideos(cache.Videos.Take(requestedUploadCount));
+            StatusText = FormatLoadedStatusText(cache.LastLoadedAt);
+            UpdateBannerVisibility();
+
+            if (cache.IsSubscribed.HasValue)
+            {
+                ApplySubscriptionButtonState(cache.IsSubscribed.Value);
+            }
+
+            return true;
+        }
+
+        private void SaveToCache(bool isSubscribed)
+        {
+            if (string.IsNullOrWhiteSpace(Channel.Id))
+                return;
+
+            ChannelCache[Channel.Id] = new ChannelPageCacheEntry
+            {
+                Channel = Channel,
+                Videos = allVideos.ToList(),
+                RequestedUploadCount = requestedUploadCount,
+                IsSubscribed = isSubscribed,
+                LastLoadedAt = DateTimeOffset.Now
+            };
+
+            PersistentCacheService.Save(
+                ChannelCacheFileName,
+                ChannelCache);
+        }
+
+        private string FormatLoadedStatusText(DateTimeOffset? lastLoadedAt = null)
+        {
+            if (allVideos.Count == 0)
+                return "No recent uploads loaded for this channel.\nLoad more to fetch additional content.";
+
+            string text =
                 $"Currently loaded: {UploadVideos.Count} uploads • {ShortVideos.Count} shorts • {LivestreamVideos.Count} livestreams\n" +
                 "Load more to fetch additional content.";
+
+            if (lastLoadedAt.HasValue)
+            {
+                text += $" Last loaded {lastLoadedAt.Value.LocalDateTime:g}.";
+            }
+
+            return text;
         }
 
         private void ReplaceVideos(IEnumerable<VideoItem> videos)
@@ -235,12 +333,18 @@ namespace SmoothTube
             SubscribeButton.IsEnabled = !success;
         }
 
-        private async System.Threading.Tasks.Task UpdateSubscriptionButtonAsync()
+        private async System.Threading.Tasks.Task<bool> UpdateSubscriptionButtonAsync()
         {
             bool isSubscribed =
                 await ServiceLocator.YouTube.IsSubscribedToChannelAsync(
                     Channel.Id);
 
+            ApplySubscriptionButtonState(isSubscribed);
+            return isSubscribed;
+        }
+
+        private void ApplySubscriptionButtonState(bool isSubscribed)
+        {
             SubscribeButton.Content =
                 isSubscribed
                     ? "Subscribed"

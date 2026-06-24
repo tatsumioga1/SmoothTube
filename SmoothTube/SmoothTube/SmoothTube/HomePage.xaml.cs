@@ -1,9 +1,9 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Navigation;
 using SmoothTube.Models;
 using SmoothTube.Services;
+using System;
 using System.Collections.ObjectModel;
 using System.Collections.Generic;
 using System.Linq;
@@ -13,6 +13,18 @@ namespace SmoothTube
 {
     public sealed partial class HomePage : Page
     {
+        private const string RecommendedCacheFileName = "home-recommended-cache.json";
+
+        private sealed class HomeRecommendedCache
+        {
+            public List<VideoItem> Videos { get; set; } = [];
+            public DateTimeOffset? RefreshedAt { get; set; }
+        }
+
+        private static readonly List<VideoItem> CachedRecommendedVideos = [];
+        private static DateTimeOffset? cachedRecommendedRefreshedAt;
+        private static bool triedPersistentRecommendedCache;
+
         public ObservableCollection<VideoItem> Videos { get; } = [];
 
         public ObservableCollection<VideoItem> ContinueWatchingVideos { get; } = [];
@@ -32,19 +44,7 @@ namespace SmoothTube
         public Visibility LoadMoreVisibility { get; set; } = Visibility.Collapsed;
 
         private bool isLoadingMore;
-
-        private bool hasLoadedOnce;
-
-        protected override async void OnNavigatedTo(
-            NavigationEventArgs e)
-        {
-            base.OnNavigatedTo(e);
-
-            if (hasLoadedOnce)
-            {
-                await RefreshContinueWatchingAsync();
-            }
-        }
+        private bool hasLoadedThisPage;
 
         public HomePage()
         {
@@ -57,37 +57,25 @@ namespace SmoothTube
             object sender,
             RoutedEventArgs e)
         {
-            await LoadVideosAsync();
+            if (hasLoadedThisPage)
+                return;
+
+            hasLoadedThisPage = true;
+            await LoadVideosAsync(false);
         }
 
-        private async Task RefreshContinueWatchingAsync()
+        private async void RefreshRecommendedButton_Click(
+            object sender,
+            RoutedEventArgs e)
         {
-            List<VideoItem> continueWatchingVideos =
-                WatchHistoryService.GetContinueWatching();
-
-            await EnrichContinueWatchingVideosAsync(continueWatchingVideos);
-
-            ReplaceVideos(
-                ContinueWatchingVideos,
-                continueWatchingVideos);
-
-            ContinueWatchingVisibility =
-                ContinueWatchingVideos.Count > 0
-                    ? Visibility.Visible
-                    : Visibility.Collapsed;
-
-            Bindings.Update();
+            await LoadVideosAsync(true);
         }
 
-        private async Task LoadVideosAsync()
+        private async Task LoadVideosAsync(bool forceRefresh)
         {
-            StatusText = "Loading videos...";
-            LoadingVisibility = Visibility.Visible;
-            VideosVisibility = Visibility.Collapsed;
+            RefreshContinueWatching();
 
             PrimarySectionTitle = "Recommended";
-
-            await RefreshContinueWatchingAsync();
 
             if (SkeletonItems.Count == 0)
             {
@@ -97,27 +85,69 @@ namespace SmoothTube
                 }
             }
 
+            if (!forceRefresh)
+            {
+                EnsurePersistentRecommendedCacheLoaded();
+            }
+
+            if (!forceRefresh && CachedRecommendedVideos.Count > 0)
+            {
+                ReplaceVideos(Videos, CachedRecommendedVideos);
+                StatusText = FormatRecommendedCacheStatus();
+                LoadingVisibility = Visibility.Collapsed;
+                VideosVisibility = Visibility.Visible;
+                LoadMoreVisibility = Visibility.Visible;
+                Bindings.Update();
+                return;
+            }
+
+            StatusText = forceRefresh
+                ? "Refreshing recommendations..."
+                : "Loading videos...";
+
+            LoadingVisibility = Videos.Count == 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
+            VideosVisibility = Videos.Count > 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
             Bindings.Update();
 
             try
             {
-                Task<List<VideoItem>> primaryTask =
-                    ServiceLocator.YouTube.GetHomeVideosAsync();
+                List<VideoItem> videos =
+                    await ServiceLocator.YouTube.GetHomeVideosAsync();
 
-                await primaryTask;
-                ReplaceVideosIfAny(Videos, primaryTask.Result);
-                StatusText = "";
+                if (videos.Count > 0)
+                {
+                    CachedRecommendedVideos.Clear();
+                    CachedRecommendedVideos.AddRange(videos);
+                    cachedRecommendedRefreshedAt = DateTimeOffset.Now;
+                    SavePersistentRecommendedCache();
+
+                    ReplaceVideos(Videos, videos);
+                }
+
+                StatusText = Videos.Count == 0
+                    ? "No recommendations loaded. Press Refresh to try again."
+                    : FormatRecommendedCacheStatus();
+
                 LoadingVisibility = Visibility.Collapsed;
-                VideosVisibility = Visibility.Visible;
-                LoadMoreVisibility =
-                    Videos.Count > 0
-                        ? Visibility.Visible
-                        : Visibility.Collapsed;
-                Bindings.Update();
+                VideosVisibility = Videos.Count > 0
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+                LoadMoreVisibility = Videos.Count > 0
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
             }
-            catch (System.Exception)
+            catch (Exception)
             {
-                StatusText = "";
+                StatusText = Videos.Count > 0
+                    ? FormatRecommendedCacheStatus()
+                    : "Could not load recommendations. Press Refresh to try again.";
+
                 LoadingVisibility = Visibility.Collapsed;
                 VideosVisibility = Videos.Count > 0
                     ? Visibility.Visible
@@ -125,8 +155,19 @@ namespace SmoothTube
                 LoadMoreVisibility = VideosVisibility;
             }
 
-            hasLoadedOnce = true;
             Bindings.Update();
+        }
+
+        private void RefreshContinueWatching()
+        {
+            ReplaceVideos(
+                ContinueWatchingVideos,
+                WatchHistoryService.GetContinueWatching());
+
+            ContinueWatchingVisibility =
+                ContinueWatchingVideos.Count > 0
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
         }
 
         private async void LoadMoreButton_Click(
@@ -153,103 +194,78 @@ namespace SmoothTube
                     {
                         Videos.Add(video);
                     }
+
+                    if (CachedRecommendedVideos.All(item => item.Id != video.Id))
+                    {
+                        CachedRecommendedVideos.Add(video);
+                    }
                 }
 
-                StatusText =
-                    moreVideos.Count == 0
-                        ? "No more recommendations returned right now."
-                        : "";
+                if (moreVideos.Count > 0)
+                {
+                    cachedRecommendedRefreshedAt ??= DateTimeOffset.Now;
+                    SavePersistentRecommendedCache();
+                }
+
+                StatusText = moreVideos.Count == 0
+                    ? "No more recommendations returned right now."
+                    : FormatRecommendedCacheStatus();
             }
-            catch (System.Exception)
+            catch (Exception)
             {
                 StatusText = "Could not load more recommendations.";
             }
 
             isLoadingMore = false;
-            LoadMoreVisibility = Visibility.Visible;
+            LoadMoreVisibility = Videos.Count > 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
             Bindings.Update();
         }
 
-
-        private static async Task EnrichContinueWatchingVideosAsync(
-            List<VideoItem> videos)
+        private static void EnsurePersistentRecommendedCacheLoaded()
         {
-            List<VideoItem> targets =
-                videos
-                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
-                    .Where(video =>
-                        string.IsNullOrWhiteSpace(video.Duration) ||
-                        string.IsNullOrWhiteSpace(video.Thumbnail) ||
-                        string.IsNullOrWhiteSpace(video.Channel))
-                    .Take(10)
-                    .ToList();
-
-            if (targets.Count == 0)
-            {
+            if (triedPersistentRecommendedCache)
                 return;
-            }
 
-            Task<VideoItem?>[] tasks =
-                targets
-                    .Select(video =>
-                        ServiceLocator.YouTube.GetVideoAsync(video.Id))
-                    .ToArray();
+            triedPersistentRecommendedCache = true;
 
-            VideoItem?[] enrichedVideos;
+            HomeRecommendedCache? cache =
+                PersistentCacheService.Load<HomeRecommendedCache>(
+                    RecommendedCacheFileName);
 
-            try
-            {
-                enrichedVideos = await Task.WhenAll(tasks);
-            }
-            catch
-            {
+            if (cache?.Videos == null || cache.Videos.Count == 0)
                 return;
-            }
 
-            foreach (VideoItem target in targets)
-            {
-                VideoItem? enriched =
-                    enrichedVideos.FirstOrDefault(video => video?.Id == target.Id);
-
-                if (enriched == null)
-                {
-                    continue;
-                }
-
-                double progress = target.Progress;
-                double resumeSeconds = target.ResumeSeconds;
-                double durationSeconds = target.DurationSeconds;
-
-                target.Title = string.IsNullOrWhiteSpace(target.Title) ? enriched.Title : target.Title;
-                target.Channel = string.IsNullOrWhiteSpace(target.Channel) ? enriched.Channel : target.Channel;
-                target.ChannelId = string.IsNullOrWhiteSpace(target.ChannelId) ? enriched.ChannelId : target.ChannelId;
-                target.Views = string.IsNullOrWhiteSpace(target.Views) ? enriched.Views : target.Views;
-                target.Duration = string.IsNullOrWhiteSpace(target.Duration) ? enriched.Duration : target.Duration;
-                target.PublishedAt = string.IsNullOrWhiteSpace(target.PublishedAt) ? enriched.PublishedAt : target.PublishedAt;
-                target.Thumbnail = string.IsNullOrWhiteSpace(target.Thumbnail) ? enriched.Thumbnail : target.Thumbnail;
-                target.IsEmbeddable = target.IsEmbeddable || enriched.IsEmbeddable;
-                target.IsLive = enriched.IsLive;
-                target.IsPremiere = enriched.IsPremiere;
-                target.IsShort = target.IsShort || enriched.IsShort;
-                target.LiveChatId = enriched.LiveChatId;
-
-                target.Progress = progress;
-                target.ResumeSeconds = resumeSeconds;
-                target.DurationSeconds = durationSeconds;
-
-                WatchHistoryService.UpdateMetadata(target);
-                WatchHistoryService.ApplySavedProgress(target);
-            }
+            CachedRecommendedVideos.Clear();
+            CachedRecommendedVideos.AddRange(cache.Videos);
+            cachedRecommendedRefreshedAt = cache.RefreshedAt;
         }
 
-        private static void ReplaceVideosIfAny(
-            ObservableCollection<VideoItem> target,
-            List<VideoItem> videos)
+        private static void SavePersistentRecommendedCache()
         {
-            if (videos.Count > 0)
-            {
-                ReplaceVideos(target, videos);
-            }
+            if (CachedRecommendedVideos.Count == 0)
+                return;
+
+            PersistentCacheService.Save(
+                RecommendedCacheFileName,
+                new HomeRecommendedCache
+                {
+                    Videos = CachedRecommendedVideos.ToList(),
+                    RefreshedAt = cachedRecommendedRefreshedAt
+                });
+        }
+
+        private string FormatRecommendedCacheStatus()
+        {
+            if (Videos.Count == 0)
+                return "Press Refresh to load recommendations.";
+
+            string refreshedText = cachedRecommendedRefreshedAt.HasValue
+                ? $" Last refreshed {cachedRecommendedRefreshedAt.Value.LocalDateTime:g}."
+                : "";
+
+            return $"Currently loaded: {Videos.Count} recommended videos.{refreshedText} Press Refresh to check for newer recommendations.";
         }
 
         private static void ReplaceVideos(

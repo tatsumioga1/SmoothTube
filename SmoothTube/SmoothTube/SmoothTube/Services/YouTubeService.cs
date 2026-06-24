@@ -31,7 +31,7 @@ namespace SmoothTube.Services
         public bool IsSearchQuotaExhausted => IsSearchQuotaCurrentlyExhausted();
         private static DateTimeOffset? searchQuotaExhaustedAt;
         private const string CachedSubscribedVideosFile = "subscription-videos.json";
-        private const int CachedSubscribedVideosVersion = 12;
+        private const int CachedSubscribedVideosVersion = 10;
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -221,23 +221,10 @@ namespace SmoothTube.Services
 
             await TryEnrichVideosAsync(videos, cancellationToken);
 
-            if (string.IsNullOrWhiteSpace(videos[0].Duration))
-            {
-                await TryEnrichDurationsFromWatchPagesAsync(
-                    videos,
-                    cancellationToken);
-            }
-
             VideoItem video = videos[0];
-
-            // Some Continue Watching entries already have title/channel info,
-            // but need duration enrichment. Do not discard a useful duration-only
-            // enrichment result just because the API did not return a title.
-            return string.IsNullOrWhiteSpace(video.Title) &&
-                string.IsNullOrWhiteSpace(video.Duration) &&
-                string.IsNullOrWhiteSpace(video.Thumbnail)
-                    ? null
-                    : video;
+            return string.IsNullOrWhiteSpace(video.Title)
+                ? null
+                : video;
         }
 
         public async Task<bool> RateVideoAsync(
@@ -561,147 +548,6 @@ namespace SmoothTube.Services
             {
             }
             catch (TaskCanceledException)
-            {
-            }
-        }
-
-        private static async Task EnsureDurationsAsync(
-            List<VideoItem> videos,
-            int maxVideos,
-            CancellationToken cancellationToken)
-        {
-            List<VideoItem> missingDurationVideos =
-                videos
-                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
-                    .Where(video => !video.IsLive && !video.IsPremiere)
-                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
-                    .Take(maxVideos)
-                    .ToList();
-
-            if (missingDurationVideos.Count == 0)
-            {
-                return;
-            }
-
-            System.Diagnostics.Debug.WriteLine(
-                $"Ensuring durations for {missingDurationVideos.Count} subscription videos via videos.list...");
-
-            await TryEnrichVideosAsync(
-                missingDurationVideos,
-                cancellationToken);
-
-            List<VideoItem> stillMissingDurationVideos =
-                missingDurationVideos
-                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
-                    .Where(video => !video.IsLive && !video.IsPremiere)
-                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
-                    .Take(maxVideos)
-                    .ToList();
-
-            if (stillMissingDurationVideos.Count == 0)
-            {
-                return;
-            }
-
-            System.Diagnostics.Debug.WriteLine(
-                $"Falling back to watch-page duration scrape for {stillMissingDurationVideos.Count} subscription videos...");
-
-            await TryEnrichDurationsFromWatchPagesAsync(
-                stillMissingDurationVideos,
-                cancellationToken);
-        }
-
-        private static async Task TryEnrichDurationsFromWatchPagesAsync(
-            IEnumerable<VideoItem> videos,
-            CancellationToken cancellationToken)
-        {
-            List<VideoItem> targets =
-                videos
-                    .Where(video => !string.IsNullOrWhiteSpace(video.Id))
-                    .Where(video => !video.IsLive && !video.IsPremiere)
-                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
-                    .Take(150)
-                    .ToList();
-
-            if (targets.Count == 0)
-            {
-                return;
-            }
-
-            using SemaphoreSlim gate = new(8);
-
-            Task[] tasks =
-                targets
-                    .Select(async video =>
-                    {
-                        await gate.WaitAsync(cancellationToken);
-
-                        try
-                        {
-                            await EnrichVideoDurationFromWatchPageAsync(
-                                video,
-                                cancellationToken);
-                        }
-                        finally
-                        {
-                            gate.Release();
-                        }
-                    })
-                    .ToArray();
-
-            try
-            {
-                await Task.WhenAll(tasks);
-            }
-            catch (TaskCanceledException)
-            {
-            }
-        }
-
-        private static async Task EnrichVideoDurationFromWatchPageAsync(
-            VideoItem video,
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                using HttpResponseMessage response =
-                    await HttpClient.GetAsync(
-                        "https://www.youtube.com/watch" +
-                        $"?v={Uri.EscapeDataString(video.Id)}" +
-                        "&bpctr=9999999999&has_verified=1",
-                        cancellationToken);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    return;
-                }
-
-                string body =
-                    await response.Content.ReadAsStringAsync(cancellationToken);
-
-                string lengthSeconds =
-                    MatchValue(
-                        body,
-                        @"""lengthSeconds"":""?(?<value>\d+)""?");
-
-                if (int.TryParse(
-                        lengthSeconds,
-                        NumberStyles.Integer,
-                        CultureInfo.InvariantCulture,
-                        out int totalSeconds))
-                {
-                    string duration =
-                        FormatDuration(totalSeconds);
-
-                    if (!string.IsNullOrWhiteSpace(duration))
-                    {
-                        video.Duration = duration;
-                    }
-                }
-            }
-            catch (Exception ex) when (ex is HttpRequestException ||
-                ex is TaskCanceledException ||
-                ex is RegexMatchTimeoutException)
             {
             }
         }
@@ -1300,9 +1146,8 @@ namespace SmoothTube.Services
                     .OrderByDescending(GetPublishedAtSort)
                     .ToList();
 
-                await EnsureDurationsAsync(
+                await EnsureVisibleSubscriptionDurationsAsync(
                     cachedVideos,
-                    150,
                     cancellationToken);
 
                 if (cachedVideos.Count > 0)
@@ -1331,10 +1176,13 @@ namespace SmoothTube.Services
                     .OrderByDescending(GetPublishedAtSort)
                     .ToList();
 
-                await EnsureDurationsAsync(
+                await EnsureVisibleSubscriptionDurationsAsync(
                     cachedVideos,
-                    150,
                     cancellationToken);
+
+                SaveCachedSubscribedVideos(
+                    cachedSubscribedVideos,
+                    maxAgeDays);
 
                 if (cachedVideos.Count > 0)
                 {
@@ -1342,7 +1190,7 @@ namespace SmoothTube.Services
                 }
 
                 // Keep refreshing below so stale cache gets replaced with fresh
-                // subscription data and enriched duration metadata.
+                // subscription data, but already show the cached list immediately.
             }
 
             List<ChannelItem> subscriptions =
@@ -1363,11 +1211,11 @@ namespace SmoothTube.Services
                     .OrderByDescending(GetPublishedAtSort)
                     .ToList();
 
-            // First pass: enrich enough raw feed videos so status, shorts,
-            // thumbnails, and basic duration metadata are improved.
+            // API enrichment fills durations when quota is available.
+            // Keep this bounded so Recent Uploads does not become slow.
             await TryEnrichVideosAsync(
                 allVideos
-                    .Take(150)
+                    .Take(100)
                     .ToList(),
                 cancellationToken);
 
@@ -1388,12 +1236,10 @@ namespace SmoothTube.Services
                 .OrderByDescending(GetPublishedAtSort)
                 .ToList();
 
-            // Second pass: enrich the actual visible Recent Uploads candidates.
-            // This prevents Shorts/filtered items from consuming the first pass
-            // and leaving displayed cards without duration badges.
-            await EnsureDurationsAsync(
+            // If Search quota/live scans burned the quota, videos.list may not fill
+            // duration badges. Fall back to a very small visible-only watch-page pass.
+            await EnsureVisibleSubscriptionDurationsAsync(
                 finalVideos,
-                150,
                 cancellationToken);
 
             SaveCachedSubscribedVideos(
@@ -1406,7 +1252,45 @@ namespace SmoothTube.Services
             }
         }
 
-        public async IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
+        private static async Task EnsureVisibleSubscriptionDurationsAsync(
+            List<VideoItem> videos,
+            CancellationToken cancellationToken)
+        {
+            List<VideoItem> visibleMissingDurations =
+                videos
+                    .Where(video => !video.IsLive && !video.IsPremiere)
+                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
+                    .Take(60)
+                    .ToList();
+
+            if (visibleMissingDurations.Count == 0)
+                return;
+
+            // First try the official videos.list details endpoint. This fills
+            // contentDetails.duration for the whole visible/load-more range.
+            await TryEnrichVideosAsync(
+                visibleMissingDurations,
+                cancellationToken);
+
+            visibleMissingDurations =
+                videos
+                    .Where(video => !video.IsLive && !video.IsPremiere)
+                    .Where(video => string.IsNullOrWhiteSpace(video.Duration))
+                    .Take(60)
+                    .ToList();
+
+            if (visibleMissingDurations.Count == 0)
+                return;
+
+            // Last-resort fallback for when API enrichment is unavailable/quota-limited.
+            // Keep it bounded to the currently loaded subscription range, not every channel.
+            await TryEnrichVideosFromWatchPagesAsync(
+                visibleMissingDurations,
+                cancellationToken);
+        }
+
+
+public async IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsync(
             string eventType = "all",
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {

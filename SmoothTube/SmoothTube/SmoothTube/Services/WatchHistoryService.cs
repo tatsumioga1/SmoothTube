@@ -280,13 +280,20 @@ namespace SmoothTube.Services
                         ? Math.Clamp(resumeSeconds / durationSeconds * 100, 0, 100)
                         : existing?.Progress ?? 0;
 
+            string durationText =
+                !string.IsNullOrWhiteSpace(source.Duration)
+                    ? source.Duration
+                    : !string.IsNullOrWhiteSpace(existing?.Duration)
+                        ? existing?.Duration ?? ""
+                        : FormatDurationFromSeconds(durationSeconds);
+
             return new VideoItem
             {
                 Id = source.Id,
                 Title = string.IsNullOrWhiteSpace(source.Title) ? existing?.Title ?? "" : source.Title,
                 Channel = string.IsNullOrWhiteSpace(source.Channel) ? existing?.Channel ?? "" : source.Channel,
                 Views = string.IsNullOrWhiteSpace(source.Views) ? existing?.Views ?? "" : source.Views,
-                Duration = string.IsNullOrWhiteSpace(source.Duration) ? existing?.Duration ?? "" : source.Duration,
+                Duration = durationText,
                 PublishedAt = string.IsNullOrWhiteSpace(source.PublishedAt) ? existing?.PublishedAt ?? "" : source.PublishedAt,
                 PublishedAtSort = source.PublishedAtSort ?? existing?.PublishedAtSort,
                 Thumbnail = NormalizeVideoThumbnailUrl(
@@ -338,6 +345,13 @@ namespace SmoothTube.Services
                             video.ResumeSeconds,
                             video.Progress,
                             0);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(video.Duration) &&
+                        video.DurationSeconds > 0)
+                    {
+                        video.Duration =
+                            FormatDurationFromSeconds(video.DurationSeconds);
                     }
 
                     video.Progress = NormalizeProgress(video.Progress);
@@ -459,6 +473,25 @@ namespace SmoothTube.Services
             }
 
             return totalSeconds;
+        }
+
+        private static string FormatDurationFromSeconds(double seconds)
+        {
+            if (double.IsNaN(seconds) ||
+                double.IsInfinity(seconds) ||
+                seconds <= 0)
+            {
+                return "";
+            }
+
+            int totalSeconds = Math.Max(0, (int)Math.Round(seconds));
+            int hours = totalSeconds / 3600;
+            int minutes = (totalSeconds % 3600) / 60;
+            int remainingSeconds = totalSeconds % 60;
+
+            return hours > 0
+                ? $"{hours}:{minutes:00}:{remainingSeconds:00}"
+                : $"{minutes}:{remainingSeconds:00}";
         }
 
         private static double NormalizeProgress(double progress)
