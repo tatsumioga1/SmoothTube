@@ -6,22 +6,26 @@ SmoothTube is a native Windows 11 YouTube client built with **WinUI 3**, **C#**,
 
 ## Current Release
 
-**Latest version:** `v1.1.0`
+**Latest version:** `v1.2.0`
 
-SmoothTube v1.1.0 focuses on subscriptions, persistent caching, duration badges, livestream/premiere behavior, video page polish, and overall usability.
+SmoothTube v1.2.0 focuses on subscription feed reliability, smoother loading, restored duration badges, improved live chat behavior, cleaner video card rendering, Library interface polish, and Release build stability.
 
-### v1.1.0 Highlights
+### v1.2.0 Highlights
 
-- Added persistent JSON-backed caching for Home, Subscriptions, and Channel pages.
-- Improved Subscriptions recent uploads ordering with time-based sorting.
-- Improved Subscriptions refresh behavior so Recent Uploads can refresh cleanly without wiping cached livestream/premiere results.
-- Added duration badge recovery for loaded subscription videos.
-- Fixed Continue Watching duration badges using saved duration seconds.
-- Improved livestream and premiere loading with quota-aware behavior and cached partial results.
-- Improved Video page layout, channel metadata, description handling, and pause behavior.
-- Improved thumbnail handling across Search, Video cards, Up next, and Channel content.
-- Updated Channel page loaded-count wording to clarify currently loaded content.
-- Added a temporary app icon for better visual coherence across Windows, taskbar, Start menu, and app package surfaces.
+- Improved Subscriptions ordering using globally sorted recent uploads from subscribed RSS feeds.
+- Fixed Load More ordering so newer uploads remain above older uploads.
+- Preserved loaded subscription cache until the user explicitly refreshes.
+- Added skeleton loading UI for smoother subscription refresh and load operations.
+- Restored reliable Subscriptions loading after duration enrichment changes.
+- Restored duration badges on RSS-loaded subscription cards using background duration fetching.
+- Prevented duration fetching from blocking or breaking the Subscriptions page.
+- Removed duration-based Shorts filtering so normal videos under 3 minutes remain visible.
+- Improved embedded YouTube live chat layout and sign-in helper behavior.
+- Fixed normal video fullscreen exit incorrectly showing the Live Chat panel.
+- Fixed leading emoji clipping in video titles and removed unwanted title spacing when no emoji is present.
+- Restored Continue Watching progress overlays on video cards.
+- Updated the Library page interface and restored its Continue Watching section.
+- Fixed packaged Release build startup crash caused by System.Text.Json reflection serialization settings.
 
 ## Overview
 
@@ -39,7 +43,7 @@ SmoothTube is still under development and may have bugs, quota limitations, or i
 - Search page with video and channel results.
 - Video page with embedded YouTube playback, metadata, recommendations, comments, and like/dislike UI state.
 - Channel pages with channel artwork, recent uploads, livestream sections, and load-more behavior.
-- Signed-in subscriptions view with recent uploads, livestream/premiere grouping, shorts filtering, refresh support, and cached subscription metadata.
+- Signed-in subscriptions view with globally sorted recent uploads, livestream/premiere grouping, shorts filtering, refresh support, duration recovery, skeleton loading, and cached subscription metadata.
 - Sidebar channel shortcuts for subscribed channels.
 - Local watch history and Continue Watching support.
 - Continue Watching progress overlays and resume playback support.
@@ -418,7 +422,7 @@ If the quota is exhausted, SmoothTube may show cached or partial live/premiere r
 
 ## Duration badges are missing
 
-SmoothTube tries to recover duration badges through API metadata and lightweight fallback checks.
+SmoothTube tries to recover duration badges through API metadata and lightweight background fallback checks.
 
 Some videos may temporarily show without duration if YouTube metadata is unavailable or quota is limited.
 
