@@ -27,6 +27,10 @@ namespace SmoothTube.Services
         private static List<ChannelItem>? cachedSubscriptions;
         private static List<VideoItem>? cachedSubscribedVideos;
         private static int cachedSubscribedVideosDays;
+        private static int subscribedRssScanIndex;
+        private static bool subscribedRssScanCompleted;
+        private static bool subscribedRssIncludeShorts;
+        private const int SubscribedRssChunkSize = 4;
         private static bool searchQuotaExhausted;
         public bool IsSearchQuotaExhausted => IsSearchQuotaCurrentlyExhausted();
         private static DateTimeOffset? searchQuotaExhaustedAt;
@@ -1134,19 +1138,39 @@ namespace SmoothTube.Services
             bool includeShorts = true,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            // RSS-first subscription refresh:
-            // Do not yield cached data from the service. The page owns the visible cache/window.
-            // This keeps Refresh deterministic: new RSS entries come in, the page merges them
-            // into the visible window, and the oldest visible items drop off.
+            // For a subscription feed to be chronologically correct, we must consider
+            // every subscribed channel's RSS feed at least once. Cursoring by channel
+            // order can show old videos before newer uploads from channels that have
+            // not been scanned yet.
+            if (cachedSubscribedVideos != null &&
+                cachedSubscribedVideosDays == maxAgeDays &&
+                subscribedRssIncludeShorts == includeShorts &&
+                cachedSubscribedVideos.Count > 0)
+            {
+                yield return cachedSubscribedVideos;
+                yield break;
+            }
+
             List<ChannelItem> subscriptions =
                 await GetSubscriptionsAsync(cancellationToken);
 
-            List<VideoItem> freshVideos = [];
-            HashSet<string> yieldedFingerprints = new(StringComparer.OrdinalIgnoreCase);
+            cachedSubscribedVideos = [];
+            cachedSubscribedVideosDays = maxAgeDays;
+            subscribedRssScanIndex = 0;
+            subscribedRssScanCompleted = false;
+            subscribedRssIncludeShorts = includeShorts;
 
-            foreach (ChannelItem[] chunk in subscriptions.Chunk(4))
+            while (subscribedRssScanIndex < subscriptions.Count)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                List<ChannelItem> chunk =
+                    subscriptions
+                        .Skip(subscribedRssScanIndex)
+                        .Take(SubscribedRssChunkSize)
+                        .ToList();
+
+                subscribedRssScanIndex += chunk.Count;
 
                 List<VideoItem>[] groups =
                     await Task.WhenAll(
@@ -1156,57 +1180,34 @@ namespace SmoothTube.Services
                                 maxAgeDays,
                                 cancellationToken)));
 
-                freshVideos =
+                cachedSubscribedVideos =
                     CleanSubscribedRecentVideos(
-                        freshVideos.Concat(groups.SelectMany(group => group)),
+                        cachedSubscribedVideos.Concat(groups.SelectMany(group => group)),
                         maxAgeDays,
                         includeShorts);
 
-                if (freshVideos.Count == 0)
-                    continue;
+                SaveCachedSubscribedVideos(
+                    cachedSubscribedVideos,
+                    maxAgeDays);
 
-                string fingerprint =
-                    string.Join(
-                        "|",
-                        freshVideos
-                            .Take(24)
-                            .Select(video => video.Id));
-
-                if (yieldedFingerprints.Add(fingerprint))
-                {
-                    yield return freshVideos;
-                }
+                if (cachedSubscribedVideos.Count > 0)
+                    yield return cachedSubscribedVideos;
             }
 
-            freshVideos =
+            subscribedRssScanCompleted = true;
+
+            cachedSubscribedVideos =
                 CleanSubscribedRecentVideos(
-                    freshVideos,
+                    cachedSubscribedVideos,
                     maxAgeDays,
                     includeShorts);
-
-            // Keep subscription refresh lightweight. Duration/view enrichment is handled
-            // elsewhere for visible cards when needed, not during the RSS fan-out.
-            cachedSubscribedVideos = freshVideos;
-            cachedSubscribedVideosDays = maxAgeDays;
 
             SaveCachedSubscribedVideos(
                 cachedSubscribedVideos,
                 maxAgeDays);
 
-            if (freshVideos.Count > 0)
-            {
-                string fingerprint =
-                    string.Join(
-                        "|",
-                        freshVideos
-                            .Take(24)
-                            .Select(video => video.Id));
-
-                if (yieldedFingerprints.Add(fingerprint))
-                {
-                    yield return freshVideos;
-                }
-            }
+            if (cachedSubscribedVideos.Count > 0)
+                yield return cachedSubscribedVideos;
         }
 
         private static List<VideoItem> CleanSubscribedRecentVideos(
@@ -1349,6 +1350,9 @@ public async IAsyncEnumerable<List<VideoItem>> GetSubscribedBroadcastBatchesAsyn
         {
             cachedSubscribedVideos = null;
             cachedSubscribedVideosDays = 0;
+            subscribedRssScanIndex = 0;
+            subscribedRssScanCompleted = false;
+            subscribedRssIncludeShorts = false;
 
             try
             {

@@ -21,6 +21,70 @@ namespace SmoothTube.Models
                 ? Channel?.Title ?? ""
                 : Video?.Title ?? "";
 
+        public string TitleLeadingEmoji =>
+            GetLeadingEmojiCluster(Title.TrimStart());
+
+        public Visibility TitleLeadingEmojiVisibility =>
+            string.IsNullOrWhiteSpace(TitleLeadingEmoji)
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+
+        public string TitleDisplayText
+        {
+            get
+            {
+                string title =
+                    Title ?? "";
+
+                string trimmedTitle =
+                    title.TrimStart();
+
+                string leadingEmoji =
+                    GetLeadingEmojiCluster(trimmedTitle);
+
+                return string.IsNullOrWhiteSpace(leadingEmoji)
+                    ? title
+                    : trimmedTitle[leadingEmoji.Length..].TrimStart();
+            }
+        }
+
+        public Thickness TitleTextMargin =>
+            TitleLeadingEmojiVisibility == Visibility.Visible
+                ? new Thickness(8, 0, 0, 0)
+                : new Thickness(0);
+
+        private static string GetLeadingEmojiCluster(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return "";
+
+            char first = text[0];
+
+            bool isSurrogateEmoji =
+                char.IsHighSurrogate(first) &&
+                text.Length > 1 &&
+                char.IsLowSurrogate(text[1]);
+
+            bool isBmpEmoji =
+                first is >= '\u2600' and <= '\u27BF';
+
+            if (!isSurrogateEmoji && !isBmpEmoji)
+                return "";
+
+            int length =
+                isSurrogateEmoji
+                    ? 2
+                    : 1;
+
+            if (text.Length > length &&
+                text[length] == '\uFE0F')
+            {
+                length++;
+            }
+
+            return text[..length];
+        }
+
         public string Subtitle =>
             Kind == "Channel"
                 ? "Channel"

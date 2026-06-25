@@ -38,6 +38,14 @@ namespace SmoothTube
 
         public string CurrentVideoMetaText { get; set; } = "";
 
+        public string CurrentVideoLeadingEmoji { get; set; } = "";
+
+        public Visibility CurrentVideoLeadingEmojiVisibility { get; set; } = Visibility.Collapsed;
+
+        public string CurrentVideoDisplayTitle { get; set; } = "";
+
+        public Thickness CurrentVideoTitleTextMargin { get; set; } = new(0);
+
         public List<VideoItem> RecommendedVideos { get; set; } = [];
 
         public List<CommentItem> Comments { get; set; } = [];
@@ -256,6 +264,76 @@ namespace SmoothTube
                 title.Contains("live stream", StringComparison.OrdinalIgnoreCase) ||
                 title.Contains("🔴", StringComparison.OrdinalIgnoreCase) ||
                 duration.Equals("LIVE", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void UpdateVideoTitlePresentation()
+        {
+            string title =
+                CurrentVideo?.Title ?? "";
+
+            CurrentVideoLeadingEmoji = "";
+            CurrentVideoDisplayTitle = title;
+
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                CurrentVideoTitleTextMargin = new Thickness(0);
+                CurrentVideoLeadingEmojiVisibility = Visibility.Collapsed;
+                return;
+            }
+
+            string trimmedTitle =
+                title.TrimStart();
+
+            string leadingEmoji =
+                GetLeadingEmojiCluster(trimmedTitle);
+
+            if (!string.IsNullOrWhiteSpace(leadingEmoji))
+            {
+                CurrentVideoLeadingEmoji = leadingEmoji;
+                CurrentVideoDisplayTitle = trimmedTitle[leadingEmoji.Length..].TrimStart();
+                CurrentVideoLeadingEmojiVisibility = Visibility.Visible;
+                CurrentVideoTitleTextMargin = new Thickness(12, 0, 0, 0);
+            }
+            else
+            {
+                CurrentVideoTitleTextMargin = new Thickness(0);
+                CurrentVideoLeadingEmojiVisibility = Visibility.Collapsed;
+            }
+        }
+
+        private static string GetLeadingEmojiCluster(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return "";
+
+            // Common single-code-unit emoji and dingbat ranges, enough for titles
+            // like 🔴 LIVE while avoiding heavy Unicode parsing dependencies.
+            char first = text[0];
+
+            bool isSurrogateEmoji =
+                char.IsHighSurrogate(first) &&
+                text.Length > 1 &&
+                char.IsLowSurrogate(text[1]);
+
+            bool isBmpEmoji =
+                first is >= '\u2600' and <= '\u27BF';
+
+            if (!isSurrogateEmoji && !isBmpEmoji)
+                return "";
+
+            int length =
+                isSurrogateEmoji
+                    ? 2
+                    : 1;
+
+            // Include variation selector if present.
+            if (text.Length > length &&
+                text[length] == '\uFE0F')
+            {
+                length++;
+            }
+
+            return text[..length];
         }
 
         private void EnsureCurrentVideoDefaults()
@@ -1005,7 +1083,7 @@ namespace SmoothTube
                     : Visibility.Visible;
 
             LiveChatPanel.Visibility =
-                isFullScreen
+                isFullScreen || !CurrentVideo.IsLive
                     ? Visibility.Collapsed
                     : Visibility.Visible;
 
@@ -1074,6 +1152,7 @@ namespace SmoothTube
                 PlayerWebView.Width = double.NaN;
                 PlayerWebView.Height = double.NaN;
                 UpdateLayoutForWidth();
+                ApplyLiveChatLayout();
             }
         }
 
@@ -1486,6 +1565,8 @@ namespace SmoothTube
 
         private void UpdateVideoMetaText()
         {
+            UpdateVideoTitlePresentation();
+
             List<string> parts = [];
 
             if (!string.IsNullOrWhiteSpace(CurrentVideo.PublishedAt))

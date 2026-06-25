@@ -69,9 +69,12 @@
                 FontSize="24"
                 FontWeight="SemiBold"/>
 
-            <Pivot
-                x:Name="SubscriptionsPivot"
-                SelectionChanged="SubscriptionsPivot_SelectionChanged">
+            <Grid>
+
+                <Pivot
+                    x:Name="SubscriptionsPivot"
+                    Visibility="{x:Bind FeedContentVisibility, Mode=OneWay}"
+                    SelectionChanged="SubscriptionsPivot_SelectionChanged">
 
                 <PivotItem Header="Recent Uploads">
 
@@ -223,6 +226,90 @@
                 </PivotItem>
 
             </Pivot>
+
+                <StackPanel
+                    x:Name="FeedSkeletonPanel"
+                    Margin="0,20,0,0"
+                    Spacing="20"
+                    Visibility="{x:Bind FeedSkeletonVisibility, Mode=OneWay}">
+
+                    <TextBlock
+                        Text="Loading subscription uploads..."
+                        FontSize="16"
+                        Opacity="0.7"/>
+
+                    <ItemsControl>
+
+                        <ItemsControl.Items>
+                            <x:Int32>1</x:Int32>
+                            <x:Int32>2</x:Int32>
+                            <x:Int32>3</x:Int32>
+                            <x:Int32>4</x:Int32>
+                            <x:Int32>5</x:Int32>
+                            <x:Int32>6</x:Int32>
+                            <x:Int32>7</x:Int32>
+                            <x:Int32>8</x:Int32>
+                        </ItemsControl.Items>
+
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapGrid
+                                    Orientation="Horizontal"
+                                    ItemWidth="300"
+                                    ItemHeight="285"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+
+                                <Border
+                                    Width="280"
+                                    Height="265"
+                                    Margin="0,0,12,20"
+                                    CornerRadius="12"
+                                    Background="#18FFFFFF">
+
+                                    <StackPanel Spacing="10">
+
+                                        <Border
+                                            Height="157.5"
+                                            CornerRadius="12"
+                                            Background="#22FFFFFF"/>
+
+                                        <Border
+                                            Width="245"
+                                            Height="18"
+                                            HorizontalAlignment="Left"
+                                            CornerRadius="4"
+                                            Background="#22FFFFFF"/>
+
+                                        <Border
+                                            Width="190"
+                                            Height="14"
+                                            HorizontalAlignment="Left"
+                                            CornerRadius="4"
+                                            Background="#16FFFFFF"/>
+
+                                        <Border
+                                            Width="120"
+                                            Height="12"
+                                            HorizontalAlignment="Left"
+                                            CornerRadius="4"
+                                            Background="#12FFFFFF"/>
+
+                                    </StackPanel>
+
+                                </Border>
+
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+
+                    </ItemsControl>
+
+                </StackPanel>
+
+            </Grid>
 
         </StackPanel>
 

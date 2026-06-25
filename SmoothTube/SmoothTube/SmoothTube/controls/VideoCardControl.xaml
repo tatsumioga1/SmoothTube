@@ -129,12 +129,43 @@
                 Grid.Row="1"
                 Margin="12,10,12,10">
 
-                <TextBlock
-                    Text="{Binding Title, ElementName=Root}"
-                    FontSize="16"
-                    FontWeight="SemiBold"
-                    TextWrapping="WrapWholeWords"
-                    MaxLines="2" />
+                <Grid ColumnSpacing="0">
+
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <Border
+                        MinWidth="20"
+                        MinHeight="24"
+                        VerticalAlignment="Top"
+                        Visibility="{x:Bind TitleLeadingEmojiVisibility, Mode=OneWay}">
+
+                        <TextBlock
+                            Text="{x:Bind TitleLeadingEmoji, Mode=OneWay}"
+                            FontSize="16"
+                            FontFamily="Segoe UI Emoji"
+                            LineHeight="24"
+                            LineStackingStrategy="BlockLineHeight"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Top"/>
+
+                    </Border>
+
+                    <TextBlock
+                        Grid.Column="1"
+                        Margin="{x:Bind TitleTextMargin, Mode=OneWay}"
+                        Text="{x:Bind TitleDisplayText, Mode=OneWay}"
+                        FontSize="16"
+                        FontWeight="SemiBold"
+                        FontFamily="Segoe UI Variable Text, Segoe UI Emoji, Segoe UI Symbol"
+                        LineHeight="21"
+                        LineStackingStrategy="BlockLineHeight"
+                        TextWrapping="WrapWholeWords"
+                        MaxLines="2"/>
+
+                </Grid>
 
                 <TextBlock
                     Margin="0,2,0,0"

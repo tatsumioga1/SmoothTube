@@ -22,6 +22,7 @@ namespace SmoothTube
             public List<VideoItem> Uploads { get; set; } = [];
             public List<VideoItem> Broadcasts { get; set; } = [];
             public int UploadDays { get; set; }
+            public int UploadDisplayLimit { get; set; }
             public bool BroadcastsLoaded { get; set; }
             public bool BroadcastQuotaExhausted { get; set; }
             public bool UploadsIncludeShorts { get; set; }
@@ -32,6 +33,7 @@ namespace SmoothTube
         private static readonly List<VideoItem> CachedUploads = [];
         private static readonly List<VideoItem> CachedBroadcasts = [];
         private static int cachedUploadDays;
+        private static int cachedUploadDisplayLimit;
         private static bool cachedBroadcastsLoaded;
         private static bool cachedBroadcastQuotaExhausted;
         private static bool cachedUploadsIncludeShorts;
@@ -54,6 +56,10 @@ namespace SmoothTube
 
         public Visibility LoadMoreVisibility { get; set; } = Visibility.Visible;
 
+        public Visibility FeedContentVisibility { get; set; } = Visibility.Visible;
+
+        public Visibility FeedSkeletonVisibility { get; set; } = Visibility.Collapsed;
+
         public Visibility RefreshIconVisibility { get; set; } = Visibility.Visible;
 
         public Visibility RefreshProgressVisibility { get; set; } = Visibility.Collapsed;
@@ -70,6 +76,7 @@ namespace SmoothTube
 
         private const int InitialUploadLimit = 24;
         private const int InitialUploadLookbackDays = 30;
+        private const int LoadMoreUploadLimitStep = 24;
 
         public SubscriptionsPage()
         {
@@ -174,6 +181,21 @@ namespace SmoothTube
             Bindings.Update();
         }
 
+        private void SetFeedLoading(bool isLoadingFeed)
+        {
+            FeedSkeletonVisibility =
+                isLoadingFeed
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+
+            FeedContentVisibility =
+                isLoadingFeed
+                    ? Visibility.Collapsed
+                    : Visibility.Visible;
+
+            Bindings.Update();
+        }
+
         private async void LoadMoreButton_Click(
             object sender,
             RoutedEventArgs e)
@@ -181,17 +203,32 @@ namespace SmoothTube
             if (isLoading)
                 return;
 
-            loadedUploadDays++;
-            currentUploadDisplayLimit += 10;
+            int previousLimit = currentUploadDisplayLimit;
 
-            await LoadUploadRangeAsync(
-                loadedUploadDays,
-                true,
-                currentUploadDisplayLimit,
-                loadCancellation?.Token ?? CancellationToken.None);
+            currentUploadDisplayLimit =
+                Math.Min(
+                    loadedUploads.Count,
+                    currentUploadDisplayLimit + LoadMoreUploadLimitStep);
+
+            if (currentUploadDisplayLimit <= previousLimit)
+            {
+                StatusText =
+                    "No more loaded uploads are available right now. Refresh to rescan subscriptions.\n" +
+                    FormatStatusText(false);
+
+                Bindings.Update();
+                return;
+            }
+
+            SetFeedLoading(true);
+            StatusText = "Preparing more subscription uploads...";
+            Bindings.Update();
+
+            await Task.Yield();
 
             SaveUploadsToPageCache();
             ApplyVisibleFilters();
+            SetFeedLoading(false);
         }
 
         private async Task LoadVideosAsync(bool forceRefresh)
@@ -204,10 +241,10 @@ namespace SmoothTube
 
             if (forceRefresh)
             {
-                // Keep the existing visible window as the refresh seed.
-                // New RSS entries replace the top of the list and the oldest visible
-                // items fall off after we re-cap to currentUploadDisplayLimit.
+                // User explicitly requested fresh data; reset the visible window back to
+                // the newest 24 and rebuild cache from scratch.
                 ServiceLocator.YouTube.ClearSubscribedVideoCache();
+                ClearUploadsCache();
             }
             else if (TryLoadFromPageCache())
             {
@@ -215,13 +252,25 @@ namespace SmoothTube
                 return;
             }
 
-            loadedUploadDays = InitialUploadLookbackDays;
-            currentUploadDisplayLimit = Math.Max(InitialUploadLimit, Videos.Count > 0 ? Videos.Count : CachedUploads.Count);
+            loadedUploadDays =
+                cachedUploadDays > 0
+                    ? cachedUploadDays
+                    : InitialUploadLookbackDays;
+
+            currentUploadDisplayLimit =
+                Math.Clamp(
+                    cachedUploadDisplayLimit > 0
+                        ? cachedUploadDisplayLimit
+                        : Math.Min(CachedUploads.Count, InitialUploadLimit),
+                    InitialUploadLimit,
+                    Math.Max(InitialUploadLimit, CachedUploads.Count));
 
             List<VideoItem> previousVisibleUploads =
                 loadedUploads.Count > 0
                     ? loadedUploads.ToList()
                     : CachedUploads.ToList();
+
+            SetFeedLoading(true);
 
             loadedUploads.Clear();
             loadedBroadcasts.Clear();
@@ -238,8 +287,8 @@ namespace SmoothTube
                     ? "Refreshing latest subscription uploads..."
                     : "Refreshing latest long-form subscription uploads..."
                 : IncludeShortsSwitch.IsOn
-                    ? "Loading recent subscription uploads..."
-                    : "Loading recent long-form subscription uploads...";
+                    ? "Scanning subscription uploads..."
+                    : "Scanning recent long-form subscription uploads...";
 
             Bindings.Update();
 
@@ -254,12 +303,14 @@ namespace SmoothTube
 
                 SaveUploadsToPageCache();
                 ApplyVisibleFilters();
+                SetFeedLoading(false);
 
                 // Livestreams/premieres are intentionally not auto-loaded here.
                 // They use the expensive broadcast scan and load only when those tabs are opened.
             }
             catch (TaskCanceledException)
             {
+                SetFeedLoading(false);
             }
             catch (Exception)
             {
@@ -270,11 +321,15 @@ namespace SmoothTube
                     StatusText =
                         "Refresh failed. Showing cached subscription results. Try again in a moment.\n" +
                         FormatStatusText(false);
+
+                    SetFeedLoading(false);
                 }
                 else
                 {
                     StatusText =
                         "Could not load subscription uploads. Try Refresh in a moment.";
+
+                    SetFeedLoading(false);
                 }
 
                 Bindings.Update();
@@ -295,10 +350,10 @@ namespace SmoothTube
             LoadMoreButton.IsEnabled = false;
 
             StatusText = append
-                ? "Loading more recent uploads..."
+                ? "Loading older subscription uploads..."
                 : IncludeShortsSwitch.IsOn
-                    ? "Loading recent subscription uploads..."
-                    : "Loading recent long-form subscription uploads...";
+                    ? "Scanning subscription uploads..."
+                    : "Scanning recent long-form subscription uploads...";
 
             Bindings.Update();
 
@@ -322,28 +377,10 @@ namespace SmoothTube
                             .OrderByDescending(GetPublishedAtSort)
                             .ToList();
 
-                    int targetLimit =
-                        Math.Max(
-                            InitialUploadLimit,
-                            displayLimit ?? currentUploadDisplayLimit);
-
                     if (append)
                     {
-                        List<VideoItem> window =
-                            loadedUploads
-                                .Concat(freshVideos)
-                                .Where(video => IsWithinRecentWindow(video, days))
-                                .GroupBy(video => video.Id, StringComparer.OrdinalIgnoreCase)
-                                .Select(group =>
-                                    group
-                                        .OrderByDescending(GetPublishedAtSort)
-                                        .First())
-                                .OrderByDescending(GetPublishedAtSort)
-                                .Take(targetLimit)
-                                .ToList();
-
-                        loadedUploads.Clear();
-                        loadedUploads.AddRange(window);
+                        // Load More no longer performs a separate RSS scan.
+                        // The initial/refresh scan builds the globally sorted backing list.
                     }
                     else
                     {
@@ -367,22 +404,12 @@ namespace SmoothTube
                                         .ThenByDescending(GetPublishedAtSort)
                                         .First())
                                 .OrderByDescending(GetPublishedAtSort)
-                                .Take(targetLimit)
                                 .ToList();
 
                         loadedUploads.Clear();
                         loadedUploads.AddRange(window);
                     }
 
-                    currentUploadDisplayLimit =
-                        Math.Max(currentUploadDisplayLimit, loadedUploads.Count);
-
-                    ApplyVisibleFilters(stillLoading: true);
-
-                    if (append)
-                    {
-                        break;
-                    }
                 }
 
                 if (append && loadedUploads.Count <= previousCount)
@@ -561,9 +588,8 @@ namespace SmoothTube
                             .ThenByDescending(video => video.IsPremiere)
                             .ThenByDescending(GetPublishedAtSort)
                             .First())
-                    .OrderByDescending(video => video.IsLive)
-                    .ThenBy(video => video.IsPremiere)
-                    .ThenByDescending(GetPublishedAtSort)
+                    .OrderByDescending(GetPublishedAtSort)
+                    .Take(currentUploadDisplayLimit)
                     .ToList();
 
             Videos.Clear();
@@ -661,7 +687,7 @@ namespace SmoothTube
                 return false;
 
             loadedUploadDays = InitialUploadLookbackDays;
-            currentUploadDisplayLimit = Math.Max(InitialUploadLimit, CachedUploads.Count);
+            currentUploadDisplayLimit = InitialUploadLimit;
 
             loadedUploads.Clear();
             loadedUploads.AddRange(
@@ -705,6 +731,7 @@ namespace SmoothTube
             CachedBroadcasts.AddRange(cache.Broadcasts ?? []);
 
             cachedUploadDays = cache.UploadDays;
+            cachedUploadDisplayLimit = cache.UploadDisplayLimit;
             cachedBroadcastsLoaded = cache.BroadcastsLoaded;
             cachedBroadcastQuotaExhausted = cache.BroadcastQuotaExhausted;
             cachedUploadsIncludeShorts = cache.UploadsIncludeShorts;
@@ -724,6 +751,7 @@ namespace SmoothTube
                     Uploads = CachedUploads.ToList(),
                     Broadcasts = CachedBroadcasts.ToList(),
                     UploadDays = cachedUploadDays,
+                    UploadDisplayLimit = cachedUploadDisplayLimit,
                     BroadcastsLoaded = cachedBroadcastsLoaded,
                     BroadcastQuotaExhausted = cachedBroadcastQuotaExhausted,
                     UploadsIncludeShorts = cachedUploadsIncludeShorts,
@@ -737,7 +765,7 @@ namespace SmoothTube
             int cacheLimit =
                 Math.Max(
                     InitialUploadLimit,
-                    currentUploadDisplayLimit);
+                    loadedUploads.Count);
 
             CachedUploads.Clear();
             CachedUploads.AddRange(
@@ -749,6 +777,7 @@ namespace SmoothTube
                     .Take(cacheLimit));
 
             cachedUploadDays = loadedUploadDays;
+            cachedUploadDisplayLimit = currentUploadDisplayLimit;
             cachedUploadsIncludeShorts = IncludeShortsSwitch.IsOn;
             cachedUploadsRefreshedAt = DateTimeOffset.Now;
             SavePersistentSubscriptionsCache();
@@ -767,6 +796,7 @@ namespace SmoothTube
         {
             CachedUploads.Clear();
             cachedUploadDays = 0;
+            cachedUploadDisplayLimit = 0;
             cachedUploadsIncludeShorts = false;
             cachedUploadsRefreshedAt = null;
 
@@ -788,6 +818,7 @@ namespace SmoothTube
             CachedUploads.Clear();
             CachedBroadcasts.Clear();
             cachedUploadDays = 0;
+            cachedUploadDisplayLimit = 0;
             cachedBroadcastsLoaded = false;
             cachedBroadcastQuotaExhausted = false;
             cachedUploadsIncludeShorts = false;

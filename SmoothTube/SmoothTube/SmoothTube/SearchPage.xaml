@@ -136,11 +136,42 @@
                                 VerticalAlignment="Center"
                                 Spacing="6">
 
-                                <TextBlock
-                                    Text="{x:Bind Title}"
-                                    FontSize="20"
-                                    FontWeight="SemiBold"
-                                    TextWrapping="WrapWholeWords"/>
+                                <Grid ColumnSpacing="0">
+
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <Border
+                                        MinWidth="24"
+                                        MinHeight="30"
+                                        VerticalAlignment="Top"
+                                        Visibility="{x:Bind TitleLeadingEmojiVisibility}">
+
+                                        <TextBlock
+                                            Text="{x:Bind TitleLeadingEmoji}"
+                                            FontSize="20"
+                                            FontFamily="Segoe UI Emoji"
+                                            LineHeight="30"
+                                            LineStackingStrategy="BlockLineHeight"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Top"/>
+
+                                    </Border>
+
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        Margin="{x:Bind TitleTextMargin}"
+                                        Text="{x:Bind TitleDisplayText}"
+                                        FontSize="20"
+                                        FontWeight="SemiBold"
+                                        FontFamily="Segoe UI Variable Text, Segoe UI Emoji, Segoe UI Symbol"
+                                        LineHeight="28"
+                                        LineStackingStrategy="BlockLineHeight"
+                                        TextWrapping="WrapWholeWords"/>
+
+                                </Grid>
 
                                 <TextBlock
                                     Text="{x:Bind Subtitle}"

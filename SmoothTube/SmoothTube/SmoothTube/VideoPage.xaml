@@ -187,13 +187,44 @@
                     x:Name="VideoInfoPanel"
                     Spacing="14">
 
-                    <TextBlock
-                        Text="{Binding Title}"
-                        FontSize="32"
-                        FontWeight="Bold"
-                        TextWrapping="WrapWholeWords"
-                        TextTrimming="CharacterEllipsis"
-                        MaxLines="2"/>
+                    <Grid ColumnSpacing="0">
+
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Border
+                            MinWidth="36"
+                            MinHeight="44"
+                            VerticalAlignment="Top"
+                            Visibility="{x:Bind CurrentVideoLeadingEmojiVisibility, Mode=OneWay}">
+
+                            <TextBlock
+                                Text="{x:Bind CurrentVideoLeadingEmoji, Mode=OneWay}"
+                                FontSize="30"
+                                FontFamily="Segoe UI Emoji"
+                                LineHeight="44"
+                                LineStackingStrategy="BlockLineHeight"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Top"/>
+
+                        </Border>
+
+                        <TextBlock
+                            Grid.Column="1"
+                            Margin="{x:Bind CurrentVideoTitleTextMargin, Mode=OneWay}"
+                            Text="{x:Bind CurrentVideoDisplayTitle, Mode=OneWay}"
+                            FontSize="32"
+                            FontWeight="Bold"
+                            FontFamily="Segoe UI Variable Display, Segoe UI Emoji, Segoe UI Symbol"
+                            LineHeight="44"
+                            LineStackingStrategy="BlockLineHeight"
+                            TextWrapping="WrapWholeWords"
+                            TextTrimming="CharacterEllipsis"
+                            MaxLines="2"/>
+
+                    </Grid>
 
                     <Grid ColumnSpacing="14">
 
