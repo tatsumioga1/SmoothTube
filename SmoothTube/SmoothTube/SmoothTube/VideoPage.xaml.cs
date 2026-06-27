@@ -731,7 +731,7 @@ namespace SmoothTube
             ApplyRoundedPlayerClip(
                 playerWidth,
                 playerHeight,
-                16);
+                12);
 
             UpdateLiveChatFrameSize();
         }
@@ -825,8 +825,8 @@ namespace SmoothTube
 
             PlayerBorder.CornerRadius =
                 canEmbedYouTube
-                    ? new CornerRadius(16)
-                    : new CornerRadius(16, 16, 0, 0);
+                    ? new CornerRadius(12)
+                    : new CornerRadius(12, 12, 0, 0);
 
             if (canEmbedYouTube)
             {
@@ -1231,7 +1231,7 @@ namespace SmoothTube
             PlayerBorder.CornerRadius =
                 isFullScreen
                     ? new CornerRadius(0)
-                    : new CornerRadius(16);
+                    : new CornerRadius(12);
 
             if (isFullScreen && XamlRoot != null)
             {

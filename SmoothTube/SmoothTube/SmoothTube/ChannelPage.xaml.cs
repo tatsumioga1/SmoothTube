@@ -23,7 +23,7 @@ namespace SmoothTube
             Timeout = TimeSpan.FromSeconds(10)
         };
 
-        private const string ChannelCacheFileName = "channel-page-cache-v2.json";
+        private const string ChannelCacheFileName = "channel-page-cache-v3.json";
 
         private sealed class ChannelPageCacheEntry
         {
@@ -722,16 +722,92 @@ namespace SmoothTube
 
         private static bool IsLikelyShort(VideoItem video)
         {
-            if (video.IsShort)
+            string title =
+                video.Title ?? "";
+
+            string category =
+                video.Category ?? "";
+
+            if (category.Equals("Shorts", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("#short", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("#shorts", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains(" youtube shorts", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("ytshorts", StringComparison.OrdinalIgnoreCase) ||
+                title.EndsWith(" #short", StringComparison.OrdinalIgnoreCase) ||
+                title.EndsWith(" #shorts", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            double durationSeconds =
+                video.DurationSeconds > 0
+                    ? video.DurationSeconds
+                    : ParseDurationSeconds(video.Duration);
+
+            if (durationSeconds <= 0)
+                return false;
+
+            // Always keep clear long-form/music-upload wording in Uploads even if
+            // the runtime is short. This avoids moving 2-3 minute music videos,
+            // lyric videos, visualizers, official audio, and performances into Shorts.
+            if (LooksLikeRegularUploadTitle(title))
+                return false;
+
+            // YouTube/fallback metadata can mark normal videos as short-eligible,
+            // but a short runtime makes that signal useful.
+            if (video.IsShort && durationSeconds <= 90)
                 return true;
 
-            string title = video.Title ?? "";
+            // Some channel feeds do not provide a reliable Shorts flag. Catch obvious
+            // Shorts-style uploads by duration only at a conservative threshold.
+            // This catches 0:13, 0:47, 1:02, 1:14 style Shorts while avoiding the
+            // old under-3-minutes rule that hid normal short uploads.
+            return durationSeconds <= 90;
+        }
 
-            return
-                title.Contains("#short", StringComparison.OrdinalIgnoreCase) ||
-                title.Contains(" shorts", StringComparison.OrdinalIgnoreCase) ||
-                title.Contains(" short ", StringComparison.OrdinalIgnoreCase) ||
-                title.EndsWith(" short", StringComparison.OrdinalIgnoreCase);
+        private static bool LooksLikeRegularUploadTitle(string title)
+        {
+            if (string.IsNullOrWhiteSpace(title))
+                return false;
+
+            return title.Contains("official music video", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("music video", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("official video", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("official audio", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("visualizer", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("lyric video", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("lyrics", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("performance", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("live performance", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("acoustic", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("trailer", StringComparison.OrdinalIgnoreCase) ||
+                title.Contains("teaser", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static double ParseDurationSeconds(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return 0;
+
+            string[] parts =
+                value
+                    .Trim()
+                    .Split(':', StringSplitOptions.RemoveEmptyEntries);
+
+            if (parts.Length == 0 || parts.Length > 3)
+                return 0;
+
+            double totalSeconds = 0;
+
+            foreach (string part in parts)
+            {
+                if (!int.TryParse(part, out int parsed))
+                    return 0;
+
+                totalSeconds = totalSeconds * 60 + parsed;
+            }
+
+            return totalSeconds;
         }
 
         private static bool IsLikelyLivestream(VideoItem video)
