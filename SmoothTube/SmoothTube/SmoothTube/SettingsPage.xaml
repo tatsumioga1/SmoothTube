@@ -64,6 +64,130 @@
 
             </StackPanel>
 
+
+            <StackPanel Spacing="12">
+
+                <StackPanel
+                    Orientation="Horizontal"
+                    Spacing="8">
+
+                    <TextBlock
+                        Text="Playback"
+                        FontSize="22"
+                        FontWeight="SemiBold"
+                        VerticalAlignment="Center"/>
+
+                    <FontIcon
+                        Glyph="&#xE946;"
+                        FontSize="14"
+                        Opacity="0.75"
+                        VerticalAlignment="Center">
+                        <ToolTipService.ToolTip>
+                            <ToolTip
+                                Content="SmoothTube can block selected video codecs before playback starts. If videos stutter, try disabling AV1 or VP8. Keep at least one codec enabled."/>
+                        </ToolTipService.ToolTip>
+                    </FontIcon>
+
+                </StackPanel>
+
+                <TextBlock
+                    Text="Choose which video codecs SmoothTube should allow YouTube to load. Blocking heavier codecs may improve playback on older or lower-power CPUs."
+                    TextWrapping="Wrap"
+                    Opacity="0.75"/>
+
+                <ToggleSwitch
+                    x:Name="AllowAv1Toggle"
+                    Header="Allow AV1 codec"
+                    OnContent="Allowed"
+                    OffContent="Blocked"
+                    Toggled="CodecToggle_Toggled"/>
+
+                <TextBlock
+                    Text="Best compression, but may stutter on systems without hardware AV1 decoding."
+                    TextWrapping="Wrap"
+                    Opacity="0.65"
+                    Margin="0,-8,0,0"/>
+
+                <ToggleSwitch
+                    x:Name="AllowVp9Toggle"
+                    Header="Allow VP9 codec"
+                    OnContent="Allowed"
+                    OffContent="Blocked"
+                    Toggled="CodecToggle_Toggled"/>
+
+                <TextBlock
+                    Text="Good quality and usually efficient on many modern systems."
+                    TextWrapping="Wrap"
+                    Opacity="0.65"
+                    Margin="0,-8,0,0"/>
+
+                <ToggleSwitch
+                    x:Name="AllowH264Toggle"
+                    Header="Allow H.264 codec"
+                    OnContent="Allowed"
+                    OffContent="Blocked"
+                    Toggled="CodecToggle_Toggled"/>
+
+                <TextBlock
+                    Text="Most compatible option, usually smooth on older hardware."
+                    TextWrapping="Wrap"
+                    Opacity="0.65"
+                    Margin="0,-8,0,0"/>
+
+                <ToggleSwitch
+                    x:Name="AllowVp8Toggle"
+                    Header="Allow VP8 codec"
+                    OnContent="Allowed"
+                    OffContent="Blocked"
+                    Toggled="CodecToggle_Toggled"/>
+
+                <TextBlock
+                    Text="Older codec. Usually safe to disable unless needed."
+                    TextWrapping="Wrap"
+                    Opacity="0.65"
+                    Margin="0,-8,0,0"/>
+
+                <InfoBar
+                    x:Name="CodecWarningInfoBar"
+                    IsOpen="False"
+                    Severity="Warning"
+                    IsClosable="False"
+                    Message="At least one codec must stay enabled. H.264 has been restored as the fallback."/>
+
+            </StackPanel>
+
+
+            <StackPanel Spacing="12">
+
+                <TextBlock
+                    Text="Local data"
+                    FontSize="22"
+                    FontWeight="SemiBold"/>
+
+                <TextBlock
+                    Text="Clear local playback progress and remove videos from the Continue Watching section. This does not affect your YouTube account or saved credentials."
+                    TextWrapping="Wrap"
+                    Opacity="0.75"/>
+
+                <StackPanel
+                    Orientation="Horizontal"
+                    Spacing="12">
+
+                    <Button
+                        Content="Clear Continue Watching"
+                        Click="ClearContinueWatching_Click"/>
+
+                </StackPanel>
+
+                <InfoBar
+                    x:Name="ClearContinueWatchingInfoBar"
+                    IsOpen="False"
+                    Severity="Success"
+                    IsClosable="True"
+                    Message="Continue Watching has been cleared."/>
+
+            </StackPanel>
+
             <StackPanel Spacing="12">
 
                 <TextBlock

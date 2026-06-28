@@ -94,6 +94,81 @@
     const startSeconds = Math.max(0, Number(params.get("startSeconds") || 0));
     const isLivePlayback = params.get("live") === "1";
 
+    /*
+      SmoothTube codec compatibility filter.
+      The app passes disabled codec tokens through blockCodecs. We report those
+      codecs as unsupported before the YouTube iframe player initializes, so
+      YouTube chooses one of the codecs the user allowed in Settings.
+    */
+    const blockedCodecTokens = new Set(
+      (params.get("blockCodecs") || "av01,vp08,vp8")
+        .split(",")
+        .map(value => value.trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+    function shouldBlockCodec(type) {
+      const normalized = String(type || "").toLowerCase();
+
+      if (!normalized) {
+        return false;
+      }
+
+      for (const codec of blockedCodecTokens) {
+        if (normalized.includes(codec)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    function installCodecCompatibilityFilter() {
+      try {
+        const mediaSource =
+          window.MediaSource ||
+          window.WebKitMediaSource;
+
+        if (mediaSource &&
+            typeof mediaSource.isTypeSupported === "function" &&
+            !mediaSource.__smoothTubeCodecFilterInstalled) {
+          const originalIsTypeSupported =
+            mediaSource.isTypeSupported.bind(mediaSource);
+
+          mediaSource.isTypeSupported = function(type) {
+            if (shouldBlockCodec(type)) {
+              return false;
+            }
+
+            return originalIsTypeSupported(type);
+          };
+
+          mediaSource.__smoothTubeCodecFilterInstalled = true;
+        }
+
+        if (window.HTMLMediaElement &&
+            window.HTMLMediaElement.prototype &&
+            typeof window.HTMLMediaElement.prototype.canPlayType === "function" &&
+            !window.HTMLMediaElement.prototype.__smoothTubeCodecFilterInstalled) {
+          const originalCanPlayType =
+            window.HTMLMediaElement.prototype.canPlayType;
+
+          window.HTMLMediaElement.prototype.canPlayType = function(type) {
+            if (shouldBlockCodec(type)) {
+              return "";
+            }
+
+            return originalCanPlayType.call(this, type);
+          };
+
+          window.HTMLMediaElement.prototype.__smoothTubeCodecFilterInstalled = true;
+        }
+      } catch (_) {
+      }
+    }
+
+    installCodecCompatibilityFilter();
+
     let idleTimer = 0;
     let progressTimer = 0;
     let resumeApplied = false;

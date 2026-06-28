@@ -22,6 +22,7 @@ using Microsoft.UI;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Hosting;
 using Windows.Foundation;
+using Windows.Storage;
 
 namespace SmoothTube
 {
@@ -71,6 +72,7 @@ namespace SmoothTube
         private bool liveChatSignInButtonDismissed;
         private DateTimeOffset? playbackStartedAt;
         private double playbackStartedResumeSeconds;
+        private string? playerCodecScriptId;
 
         public VideoPage()
         {
@@ -865,13 +867,222 @@ namespace SmoothTube
                         ? "&live=1"
                         : "";
 
+                // User-controlled codec filter.
+                // The URL parameter keeps the local player shell aware of preferences,
+                // while the injected script patches YouTube iframe documents before
+                // they run codec checks.
+                List<string> blockedCodecTokens =
+                    GetBlockedCodecTokens();
+
+                string codecParameter =
+                    BuildCodecPreferenceParameter(blockedCodecTokens);
+
+                await InstallCodecPreferenceScriptAsync(blockedCodecTokens);
+
                 playbackStartedAt = DateTimeOffset.Now;
                 playbackStartedResumeSeconds = resumeSeconds;
                 playerLoadedForLiveMode = shouldPlayLiveEdge;
 
                 PlayerWebView.CoreWebView2.Navigate(
-                    $"https://smoothtube.local/youtube-player.html?videoId={videoId}{startParameter}{liveParameter}");
+                    $"https://smoothtube.local/youtube-player.html?videoId={videoId}{startParameter}{liveParameter}{codecParameter}");
             }
+        }
+
+
+        private async Task InstallCodecPreferenceScriptAsync(
+            IReadOnlyCollection<string> blockedCodecTokens)
+        {
+            if (PlayerWebView?.CoreWebView2 == null)
+            {
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(playerCodecScriptId))
+            {
+                try
+                {
+                    PlayerWebView.CoreWebView2.RemoveScriptToExecuteOnDocumentCreated(
+                        playerCodecScriptId);
+                }
+                catch (Exception)
+                {
+                    // If WebView2 already dropped the script registration, continue safely.
+                }
+
+                playerCodecScriptId = null;
+            }
+
+            if (blockedCodecTokens.Count == 0)
+            {
+                return;
+            }
+
+            string blockedCodecJson =
+                JsonSerializer.Serialize(
+                    blockedCodecTokens
+                        .Select(token => token.ToLowerInvariant())
+                        .Distinct()
+                        .ToArray());
+
+            string script = @"(() => {
+    const blockedCodecTokens = new Set(__SMOOTHTUBE_BLOCKED_CODECS__);
+
+    function shouldBlockCodec(type) {
+        const normalized = String(type || '').toLowerCase();
+
+        if (!normalized) {
+            return false;
+        }
+
+        for (const codec of blockedCodecTokens) {
+            if (normalized.includes(codec)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function extractCodecText(configuration) {
+        try {
+            if (!configuration || typeof configuration !== 'object') {
+                return '';
+            }
+
+            const video = configuration.video || {};
+            const audio = configuration.audio || {};
+
+            return [
+                video.contentType,
+                video.mimeType,
+                video.codec,
+                video.codecs,
+                audio.contentType,
+                audio.mimeType,
+                audio.codec,
+                audio.codecs
+            ].filter(Boolean).join(' ');
+        } catch (_) {
+            return '';
+        }
+    }
+
+    try {
+        const mediaSource = window.MediaSource || window.WebKitMediaSource;
+
+        if (mediaSource &&
+            typeof mediaSource.isTypeSupported === 'function' &&
+            !mediaSource.__smoothTubeCodecFilterInstalled) {
+            const originalIsTypeSupported = mediaSource.isTypeSupported.bind(mediaSource);
+
+            mediaSource.isTypeSupported = function(type) {
+                if (shouldBlockCodec(type)) {
+                    return false;
+                }
+
+                return originalIsTypeSupported(type);
+            };
+
+            mediaSource.__smoothTubeCodecFilterInstalled = true;
+        }
+    } catch (_) {
+    }
+
+    try {
+        if (window.HTMLMediaElement &&
+            window.HTMLMediaElement.prototype &&
+            typeof window.HTMLMediaElement.prototype.canPlayType === 'function' &&
+            !window.HTMLMediaElement.prototype.__smoothTubeCodecFilterInstalled) {
+            const originalCanPlayType = window.HTMLMediaElement.prototype.canPlayType;
+
+            window.HTMLMediaElement.prototype.canPlayType = function(type) {
+                if (shouldBlockCodec(type)) {
+                    return '';
+                }
+
+                return originalCanPlayType.call(this, type);
+            };
+
+            window.HTMLMediaElement.prototype.__smoothTubeCodecFilterInstalled = true;
+        }
+    } catch (_) {
+    }
+
+    try {
+        if (navigator.mediaCapabilities &&
+            typeof navigator.mediaCapabilities.decodingInfo === 'function' &&
+            !navigator.mediaCapabilities.__smoothTubeCodecFilterInstalled) {
+            const originalDecodingInfo = navigator.mediaCapabilities.decodingInfo.bind(navigator.mediaCapabilities);
+
+            navigator.mediaCapabilities.decodingInfo = function(configuration) {
+                if (shouldBlockCodec(extractCodecText(configuration))) {
+                    return Promise.resolve({
+                        supported: false,
+                        smooth: false,
+                        powerEfficient: false
+                    });
+                }
+
+                return originalDecodingInfo(configuration);
+            };
+
+            navigator.mediaCapabilities.__smoothTubeCodecFilterInstalled = true;
+        }
+    } catch (_) {
+    }
+})();".Replace("__SMOOTHTUBE_BLOCKED_CODECS__", blockedCodecJson);
+
+            playerCodecScriptId =
+                await PlayerWebView.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(script);
+        }
+
+        private static List<string> GetBlockedCodecTokens()
+        {
+            List<string> blockedCodecs = [];
+
+            if (!GetBoolSetting("Playback.AllowAv1", false))
+            {
+                blockedCodecs.Add("av01");
+            }
+
+            if (!GetBoolSetting("Playback.AllowVp9", true))
+            {
+                blockedCodecs.Add("vp09");
+                blockedCodecs.Add("vp9");
+            }
+
+            if (!GetBoolSetting("Playback.AllowH264", true))
+            {
+                blockedCodecs.Add("avc1");
+            }
+
+            if (!GetBoolSetting("Playback.AllowVp8", false))
+            {
+                blockedCodecs.Add("vp08");
+                blockedCodecs.Add("vp8");
+            }
+
+            return blockedCodecs;
+        }
+
+        private static string BuildCodecPreferenceParameter(
+            IReadOnlyCollection<string> blockedCodecTokens)
+        {
+            return blockedCodecTokens.Count == 0
+                ? ""
+                : $"&blockCodecs={Uri.EscapeDataString(string.Join(',', blockedCodecTokens))}";
+        }
+
+        private static bool GetBoolSetting(
+            string key,
+            bool defaultValue)
+        {
+            object? value =
+                ApplicationData.Current.LocalSettings.Values[key];
+
+            return value is bool boolValue
+                ? boolValue
+                : defaultValue;
         }
 
         private void OpenOnYouTube_Click(
