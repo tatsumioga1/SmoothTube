@@ -6,26 +6,24 @@ SmoothTube is a native Windows 11 YouTube client built with **WinUI 3**, **C#**,
 
 ## Current Release
 
-**Latest version:** `v1.2.0`
+**Latest version:** `v1.3.0`
 
-SmoothTube v1.2.0 focuses on subscription feed reliability, smoother loading, restored duration badges, improved live chat behavior, cleaner video card rendering, Library interface polish, and Release build stability.
+SmoothTube v1.3.0 focuses on light mode polish, fullscreen player cleanup, fresher video metadata, improved Channel page loading, better upload pagination, and overall watch-page refinement.
 
 ### v1.2.0 Highlights
 
-- Improved Subscriptions ordering using globally sorted recent uploads from subscribed RSS feeds.
-- Fixed Load More ordering so newer uploads remain above older uploads.
-- Preserved loaded subscription cache until the user explicitly refreshes.
-- Added skeleton loading UI for smoother subscription refresh and load operations.
-- Restored reliable Subscriptions loading after duration enrichment changes.
-- Restored duration badges on RSS-loaded subscription cards using background duration fetching.
-- Prevented duration fetching from blocking or breaking the Subscriptions page.
-- Removed duration-based Shorts filtering so normal videos under 3 minutes remain visible.
-- Improved embedded YouTube live chat layout and sign-in helper behavior.
-- Fixed normal video fullscreen exit incorrectly showing the Live Chat panel.
-- Fixed leading emoji clipping in video titles and removed unwanted title spacing when no emoji is present.
-- Restored Continue Watching progress overlays on video cards.
-- Updated the Library page interface and restored its Continue Watching section.
-- Fixed packaged Release build startup crash caused by System.Text.Json reflection serialization settings.
+- Optimized light mode styling across watch pages, cards, lists, and surrounding surfaces for a cleaner and more consistent look.
+- Fixed the embedded player fullscreen border issue and improved fullscreen sizing/alignment so videos fill the available space more cleanly.
+- Improved player edge and corner presentation in light mode so the video area blends better with lighter surfaces.
+- Refreshed video metadata handling so view counts and published / streamed relative time are based on actual timestamps instead of stale cached text.
+- Improved reopening videos from Continue Watching / history so older entries refresh their metadata when revisited.
+- Fixed upload and livestream relative-time formatting so labels like “4 hours ago” stay accurate.
+- Improved Channel page loading for uploads, including better handling for channels where content was not appearing correctly.
+- Improved older upload pagination / Load more behavior for Channel pages.
+- Added a Channel page refresh action to reload cached channel content and fetch newer uploads more reliably.
+- Matched the Channel page refresh button to the Subscriptions page style, including the inline rotating loading indicator.
+- Added additional watch-page, channel-page, and metadata presentation polish across the updated UI.
+- Added title bar branding and refreshed Windows icon resources as part of broader app presentation improvements.
 
 ## Overview
 
