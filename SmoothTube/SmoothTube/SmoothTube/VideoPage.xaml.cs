@@ -70,6 +70,8 @@ namespace SmoothTube
         private bool isStoppingPlayback;
         private bool playerLoadedForLiveMode;
         private bool liveChatSignInButtonDismissed;
+        private string currentVideoEnrichmentId = "";
+        private Task<VideoItem?>? currentVideoEnrichmentTask;
         private DateTimeOffset? playbackStartedAt;
         private double playbackStartedResumeSeconds;
         private string? playerCodecScriptId;
@@ -1896,8 +1898,10 @@ namespace SmoothTube
             if (CurrentVideo == null)
                 return "";
 
-            if (!CurrentVideo.IsLive &&
-                !CurrentVideo.IsPremiere &&
+            if (CurrentVideo.IsLive)
+                return "Live now";
+
+            if (!CurrentVideo.IsPremiere &&
                 CurrentVideo.PublishedAtSort.HasValue)
             {
                 return FormatRelativePublishedAt(
@@ -2974,7 +2978,7 @@ namespace SmoothTube
             }
 
             VideoItem? enrichedVideo =
-                await ServiceLocator.YouTube.GetVideoAsync(CurrentVideo.Id);
+                await GetCurrentVideoEnrichmentAsync();
 
             if (enrichedVideo == null)
                 return;
@@ -3188,16 +3192,14 @@ namespace SmoothTube
                 // Check only the video the user actually opened, so Subscriptions remains
                 // RSS-first and lightweight while VideoPage can still enable live chat.
                 VideoItem? enrichedVideo =
-                    await ServiceLocator.YouTube.GetVideoAsync(CurrentVideo.Id);
+                    await GetCurrentVideoEnrichmentAsync();
 
                 if (enrichedVideo == null)
                     return;
 
-                bool inferredLive =
-                    LooksLikeLiveVideo(CurrentVideo) ||
-                    LooksLikeLiveVideo(enrichedVideo);
-
-                CurrentVideo.IsLive = enrichedVideo.IsLive || inferredLive;
+                // The single-video API + watch-page check is authoritative here.
+                // Title heuristics are only used below when metadata is unavailable.
+                CurrentVideo.IsLive = enrichedVideo.IsLive;
                 CurrentVideo.IsPremiere = !CurrentVideo.IsLive && enrichedVideo.IsPremiere;
                 CurrentVideo.LiveChatId = enrichedVideo.LiveChatId;
 
@@ -3280,6 +3282,21 @@ namespace SmoothTube
                     WatchHistoryService.UpdateMetadata(CurrentVideo);
                 }
             }
+        }
+
+        private Task<VideoItem?> GetCurrentVideoEnrichmentAsync()
+        {
+            string videoId = CurrentVideo.Id;
+
+            if (currentVideoEnrichmentTask == null ||
+                !currentVideoEnrichmentId.Equals(videoId, StringComparison.Ordinal))
+            {
+                currentVideoEnrichmentId = videoId;
+                currentVideoEnrichmentTask =
+                    ServiceLocator.YouTube.GetVideoAsync(videoId);
+            }
+
+            return currentVideoEnrichmentTask;
         }
 
         private async Task LoadCommentsAsync()

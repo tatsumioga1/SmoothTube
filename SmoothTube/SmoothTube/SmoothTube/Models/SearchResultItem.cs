@@ -192,6 +192,14 @@ namespace SmoothTube.Models
             if (string.IsNullOrWhiteSpace(value))
                 return "";
 
+            value = value.Trim();
+
+            if (value.StartsWith("Assets/", System.StringComparison.OrdinalIgnoreCase) ||
+                value.StartsWith("Assets\\", System.StringComparison.OrdinalIgnoreCase))
+            {
+                return "ms-appx:///" + value.Replace('\\', '/');
+            }
+
             if (value.StartsWith("//", System.StringComparison.Ordinal))
                 value = "https:" + value;
 
@@ -206,37 +214,9 @@ namespace SmoothTube.Models
 
         private static string PreferWideYouTubeThumbnail(string value)
         {
-            if (string.IsNullOrWhiteSpace(value))
-                return "";
-
-            if (!System.Uri.TryCreate(value, System.UriKind.Absolute, out System.Uri? uri))
-                return value;
-
-            string host = uri.Host.ToLowerInvariant();
-            if (!host.Contains("ytimg.com"))
-                return value;
-
-            string[] segments = uri.AbsolutePath
-                .Split('/', System.StringSplitOptions.RemoveEmptyEntries);
-
-            int videoIdIndex = -1;
-
-            for (int i = 0; i < segments.Length - 1; i++)
-            {
-                if (segments[i] == "vi" ||
-                    segments[i] == "vi_webp")
-                {
-                    videoIdIndex = i + 1;
-                    break;
-                }
-            }
-
-            if (videoIdIndex < 0 || videoIdIndex >= segments.Length)
-                return value;
-
-            string videoId = segments[videoIdIndex];
-
-            return $"https://i.ytimg.com/vi/{videoId}/hq720.jpg";
+            // Do not manufacture hq720.jpg URLs: many valid YouTube videos do not
+            // have that rendition. The source-selected image is the reliable one.
+            return value;
         }
     }
 }

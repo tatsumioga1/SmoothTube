@@ -148,11 +148,19 @@ namespace SmoothTube.Services
                     .ToList();
             }
 
+            bool canUseYouTubeApi =
+                HasApiKey || ServiceLocator.GoogleOAuth.IsSignedIn;
+
             Task<List<VideoItem>> videosTask =
-                SearchAsync(query, cancellationToken);
+                canUseYouTubeApi
+                    ? SearchYouTubeAsync(
+                        query,
+                        cancellationToken,
+                        useCatalogFallback: false)
+                    : Task.FromResult(new List<VideoItem>());
 
             Task<List<ChannelItem>> channelsTask =
-                HasApiKey || ServiceLocator.GoogleOAuth.IsSignedIn
+                canUseYouTubeApi
                     ? SearchChannelsAsync(query, cancellationToken)
                     : Task.FromResult(new List<ChannelItem>());
 
@@ -174,21 +182,32 @@ namespace SmoothTube.Services
                     Video = video
                 }));
 
-            if (results.Count == 0)
+            int videoCount = results.Count(result => result.Video != null);
+            bool hasChannel = results.Any(result => result.Channel != null);
+
+            // API access can be unavailable or quota-limited. The public results
+            // page contains both channels and videos, so use it to fill an empty or
+            // suspiciously small response instead of accepting the demo catalog as
+            // a complete online search.
+            if (!hasChannel || videoCount < 8)
             {
-                results.AddRange(
+                MergeSearchResults(
+                    results,
+                    await SearchYouTubeResultsPageAsync(query, cancellationToken));
+            }
+
+            videoCount = results.Count(result => result.Video != null);
+
+            if (videoCount < 8)
+            {
+                MergeSearchResults(
+                    results,
                     (await SearchInvidiousAsync(query, cancellationToken))
                         .Select(video => new SearchResultItem
                         {
                             Kind = "Video",
                             Video = video
                         }));
-            }
-
-            if (results.Count == 0)
-            {
-                results.AddRange(
-                    await SearchYouTubeResultsPageAsync(query, cancellationToken));
             }
 
             if (results.Count == 0)
@@ -205,6 +224,41 @@ namespace SmoothTube.Services
             }
 
             return results;
+        }
+
+        private static void MergeSearchResults(
+            List<SearchResultItem> target,
+            IEnumerable<SearchResultItem> additions)
+        {
+            HashSet<string> videoIds =
+                target
+                    .Where(result => result.Video != null)
+                    .Select(result => result.Video!.Id)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            HashSet<string> channelIds =
+                target
+                    .Where(result => result.Channel != null)
+                    .Select(result => result.Channel!.Id)
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (SearchResultItem addition in additions)
+            {
+                if (addition.Video != null &&
+                    !string.IsNullOrWhiteSpace(addition.Video.Id) &&
+                    videoIds.Add(addition.Video.Id))
+                {
+                    target.Add(addition);
+                }
+                else if (addition.Channel != null &&
+                    !string.IsNullOrWhiteSpace(addition.Channel.Id) &&
+                    channelIds.Add(addition.Channel.Id))
+                {
+                    target.Add(addition);
+                }
+            }
         }
 
         public async Task<VideoItem?> GetVideoAsync(
@@ -228,7 +282,14 @@ namespace SmoothTube.Services
             await TryEnrichVideosAsync(videos, cancellationToken);
 
             VideoItem video = videos[0];
-            return string.IsNullOrWhiteSpace(video.Title)
+            // The videos API is normally authoritative, but liveBroadcastContent can
+            // briefly lag behind the watch page when a scheduled stream goes live.
+            // Verify the one video the user opened so live chat appears reliably.
+            await EnrichVideoFromWatchPageAsync(video, cancellationToken);
+
+            return string.IsNullOrWhiteSpace(video.Title) &&
+                !video.IsLive &&
+                !video.IsPremiere
                 ? null
                 : video;
         }
@@ -507,7 +568,8 @@ namespace SmoothTube.Services
 
         private static async Task<List<VideoItem>> SearchYouTubeAsync(
             string query,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool useCatalogFallback = true)
         {
             string encodedQuery = Uri.EscapeDataString(query);
             string requestUri =
@@ -566,11 +628,15 @@ namespace SmoothTube.Services
             }
             catch (HttpRequestException)
             {
-                return VideoCatalog.Search(query);
+                return useCatalogFallback
+                    ? VideoCatalog.Search(query)
+                    : [];
             }
             catch (JsonException)
             {
-                return VideoCatalog.Search(query);
+                return useCatalogFallback
+                    ? VideoCatalog.Search(query)
+                    : [];
             }
         }
 
@@ -788,9 +854,6 @@ namespace SmoothTube.Services
                             @"""isLiveNow"":true",
                             StringComparison.OrdinalIgnoreCase) ||
                         body.Contains(
-                            @"""isLivePlayback"":true",
-                            StringComparison.OrdinalIgnoreCase) ||
-                        body.Contains(
                             @"""liveBroadcastContent"":""live""",
                             StringComparison.OrdinalIgnoreCase));
 
@@ -811,11 +874,9 @@ namespace SmoothTube.Services
                     video.PublishedAtSort ??= DateTimeOffset.Now;
                 }
 
-                else
-                {
-                    video.IsLive = false;
-                    video.IsPremiere = false;
-                }
+                // If the watch page does not contain an explicit broadcast marker,
+                // keep any authoritative state already returned by the videos API.
+                // Consent, region, and transient watch pages can omit these markers.
 
                 if (body.Contains(
                         $"/shorts/{video.Id}",
@@ -3184,17 +3245,9 @@ namespace SmoothTube.Services
             if (thumbnail.StartsWith("//", StringComparison.Ordinal))
                 thumbnail = "https:" + thumbnail;
 
-            if (string.IsNullOrWhiteSpace(thumbnail) ||
-                !thumbnail.Contains("ytimg.com/vi/", StringComparison.OrdinalIgnoreCase))
-            {
-                return thumbnail;
-            }
-
-            return Regex.Replace(
-                thumbnail,
-                @"/(?:default|mqdefault|hqdefault|sddefault)\.jpg",
-                "/hq720.jpg",
-                RegexOptions.IgnoreCase);
+            // Keep the thumbnail YouTube actually advertised. hq720.jpg is not
+            // generated for every upload and rewriting to it produces blank cards.
+            return thumbnail;
         }
 
         private static string GetSafeVideoThumbnailUrl(
